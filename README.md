@@ -94,7 +94,7 @@ Then edit:
 | Item | What it does |
 |---|---|
 | **Get report now… ⌘R** | Opens the report window. Pick **Today so far**, **Previous workday**, **Pick a date**, or **Date range**, then **Generate**. Choosing **Date range** opens a mini calendar (two months, ◀ ▶ to move): click the first day, then the last day, and the days between are highlighted. Click the 📅 button to change the range later. A range report is written **day by day**: one section per date, projects inside each date. Workdays with nothing captured say so, and weekends appear only if you worked. A spinner shows while Claude writes (up to a minute), and **Cancel** stops it. If a report for that day already exists, it's shown right away with its *Generated at* time. Claude isn't called again unless you click **Regenerate**. |
-| **Log something… ⌘L** | One line of text + a project. It's added to that day's report and treated as true. |
+| **Log something… ⌘L** | One line of text + a project. It's added to that day's report and treated as true. The project box lists your config projects, **General TESDA work** (admin, office, HR, meetings outside a project), and any name you've typed before. You can also **type a new name** (e.g. *Regional Office Support*). It autocompletes, remembers new names, and preselects the last one you used. These projects appear in the report like TSP and TRACK; they don't need to be in config.json. |
 | Open reports folder | Opens the reports folder in Finder. |
 | Export TESDA history… | Zips the archived TESDA transcripts into the reports folder and shows the file in Finder. |
 | Settings (config.json) | Opens your config. |
@@ -119,6 +119,8 @@ worklog report today --no-ai    # skip Claude: just the raw evidence
 worklog report today --open     # show it in the window/browser when done
 worklog log "Attended TRACK sprint planning" --project=TRACK      # partial names work
 worklog log "Reviewed UAT checklist" --project=TSP --date=2026-10-30
+worklog log "Monthly staff meeting" --project="General TESDA work"
+worklog log "Set up the training room projector" --project="Regional Office Support"   # new names are fine
 worklog sessions [DAY]          # what was captured and how each session was classified
 worklog folders                 # every folder you've used Claude Code in
 worklog archive                 # TESDA history archive: size, next purge date
@@ -180,7 +182,7 @@ To run it right now: `launchctl kickstart -k gui/$(id -u)/ph.tesda.worklog.repor
 ## Development
 
 ```bash
-python3 -m unittest discover -s tests -v       # 46 tests on synthetic transcripts (tests/fixtures)
+python3 -m unittest discover -s tests -v       # 49 tests on synthetic transcripts (tests/fixtures)
 python3 tests/make_fixtures.py                 # regenerate the fixtures after editing them
 swiftc -O menubar.swift -o build/TESDAWorklog  # compile check
 swift assets/make_icon.swift                   # redraw the icons (AppIcon.icns, menu bar MenuIcon*.png)

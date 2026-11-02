@@ -50,7 +50,7 @@ flowchart TB
 | `install.sh` | Copies the app to `~/Library/Application Support/TESDA-Worklog`, compiles Swift, creates the config, the `worklog` command and the Documents link, and writes and loads both LaunchAgents. Safe to run again. |
 | `uninstall.sh` | Removes jobs, binaries and the command. Keeps data unless you pass `--all`. |
 | `tests/make_fixtures.py` | Writes synthetic transcripts that mimic the real JSONL format, including the noisy parts. |
-| `tests/test_worklog.py` | 46 stdlib `unittest` tests. Claude is replaced by a fake executable that records its arguments. |
+| `tests/test_worklog.py` | 49 stdlib `unittest` tests. Claude is replaced by a fake executable that records its arguments. |
 | `reference/` | The earlier prototype, kept for comparison. |
 
 Data files (all in the app folder): `config.json`, `manual_log.jsonl` (one JSON object per entry), `state.json` (last morning delivery, last archive purge, alerts already shown), `running.json` (the PID of a report being written), `inbox/` (requests to the menu bar app), `archive/` (copies of TESDA transcripts), `logs/`, `reports/`.
@@ -88,6 +88,8 @@ Claude Code writes one JSONL file per session. Only lines with `type` set to `us
 **Reports are in the app folder, linked from Documents.** During testing, the background job was refused (`Operation not permitted`) when it tried to replace a report in `~/Documents` that Terminal had created. That's macOS privacy protection (TCC). So reports are written where no such gate applies, and `~/Documents/TESDA-Worklog/reports` is a link to them.
 
 **Date ranges: one pass, one Claude call, written day by day.** `read_sessions(start, end=…)` reads the transcripts once and returns a record per (session, local day). The evidence is grouped by date, then by project, and includes workdays with nothing captured. The prompt asks for one `##` section per date with `###` projects inside, and forbids moving or merging work across days. The no-AI fallback uses the same layout. The evidence budget grows to about 100k characters and trims prompts harder if needed. Range reports are saved as `START_to_END.*`. In the window, `RangeCalendarView` is a small custom-drawn two-month calendar in a popover, so a range can be picked with two clicks across months.
+
+**Manual entries aren't limited to config projects.** Folders decide which *Claude sessions* count as TESDA. But anything you log by hand is TESDA work by definition, so its project can be any name: a config project, the built-in *General TESDA work*, or a name you type. `match_project` reuses an existing name regardless of case, expands a unique partial match of a config project ("track" → "TESDA-TRACK"), and otherwise keeps your new name. The dialog's list comes from config plus the names in `manual_log.jsonl`, so nothing else needs storing.
 
 **TESDA history: copy, don't configure.** You asked for TESDA transcripts to be kept until Jun 30 / Dec 31, and other projects to keep Claude Code's 30 days. Claude Code's `cleanupPeriodDays` is global and rolling, so it can't do that. Instead, the daily job copies transcripts from TESDA folders into the app's own `archive/`. After alerts 7 days before and on the day, it deletes them the morning after each purge date. Claude Code's settings and `~/.claude/projects` are never modified. A purged half-year isn't re-archived from transcripts that Claude Code hasn't cleaned up yet: `state.json` records the cutoff.
 

@@ -177,11 +177,30 @@ class ManualEntries(unittest.TestCase):
         fri = worklog.read_manual(FRI)
         self.assertEqual([(m["project"], m["text"]) for m in fri], [(TRACK, "Attended TRACK sprint planning")])
 
-    def test_unknown_project_and_empty_text_are_errors(self):
-        with self.assertRaises(worklog.WorklogError):
-            worklog.add_manual("x", "Nope", cfg())
+    def test_empty_text_is_an_error(self):
         with self.assertRaises(worklog.WorklogError):
             worklog.add_manual("   ", TSP, cfg())
+
+    def test_other_tesda_work_gets_its_own_project(self):
+        e = worklog.add_manual("Helped set up the regional office printer", "  Regional   Office Support ", cfg())
+        self.assertEqual(e["project"], "Regional Office Support")              # new name, tidied
+        e = worklog.add_manual("Monthly staff meeting", "general tesda work", cfg())
+        self.assertEqual(e["project"], worklog.GENERAL_PROJECT)                 # built-in choice, any case
+        e = worklog.add_manual("Printer follow-up", "regional office support", cfg())
+        self.assertEqual(e["project"], "Regional Office Support")              # reuses the earlier spelling
+        e = worklog.add_manual("x", "TESDA", cfg())                             # ambiguous partial: not guessed
+        self.assertEqual(e["project"], "TESDA")
+
+    def test_log_choices_order(self):
+        worklog.add_manual("a", "ICT Helpdesk", cfg())
+        worklog.add_manual("b", "Regional Office Support", cfg())
+        self.assertEqual(worklog.log_choices(cfg()),
+                         [TSP, TRACK, worklog.GENERAL_PROJECT, "Regional Office Support", "ICT Helpdesk"])
+
+    def test_other_projects_appear_in_report(self):
+        worklog.add_manual("Coordinated the regional skills fair", "Regional Office Support", cfg(), on_day=FRI)
+        meta = worklog.build_report(FRI, cfg(), use_ai=False)
+        self.assertIn("## Regional Office Support", Path(meta["md"]).read_text())
 
     def test_cli_log(self):
         self.assertEqual(worklog.main(["log", "QA", "of", "TSP", "--project=TSP", "--date=2026-10-30"]), 0)

@@ -318,19 +318,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func logSomething() {
-        let projects = WorklogRun(["projects"]).runNow().out
-            .split(separator: "\n").map(String.init).filter { !$0.isEmpty }
+        // Choices: config projects, "General TESDA work", then names typed before (most recent first).
+        let info = WorklogRun(["projects", "--log"]).runNow().json ?? [:]
+        let choices = info["choices"] as? [String] ?? []
+        let last = info["last"] as? String
 
         let alert = NSAlert()
         alert.messageText = "Log TESDA work"
-        alert.informativeText = "Meetings, QA, coordination, documentation: anything you didn't do in Claude Code."
+        alert.informativeText = "Meetings, QA, coordination, documentation: anything you didn't do in Claude Code. "
+            + "Pick a project or type a new one (e.g. Regional Office Support)."
         let field = NSTextField(frame: NSRect(x: 0, y: 34, width: 360, height: 24))
         field.placeholderString = "e.g. Attended TRACK sprint planning with the regional office"
-        let popup = NSPopUpButton(frame: NSRect(x: -2, y: 0, width: 364, height: 26))
-        popup.addItems(withTitles: projects.isEmpty ? ["(add projects to config.json)"] : projects)
+        let project = NSComboBox(frame: NSRect(x: 0, y: 0, width: 360, height: 26))
+        project.addItems(withObjectValues: choices)
+        project.completes = true                       // autocompletes names as you type
+        project.numberOfVisibleItems = min(max(choices.count, 3), 12)
+        project.placeholderString = "Project: pick one or type a new one"
+        project.stringValue = last ?? choices.first ?? ""
         let box = NSView(frame: NSRect(x: 0, y: 0, width: 360, height: 60))
         box.addSubview(field)
-        box.addSubview(popup)
+        box.addSubview(project)
         alert.accessoryView = box
         alert.addButton(withTitle: "Log")
         alert.addButton(withTitle: "Cancel")
@@ -341,7 +348,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let text = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         var args = ["log", text]
-        if !projects.isEmpty, let p = popup.titleOfSelectedItem { args.append("--project=\(p)") }
+        let name = project.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !name.isEmpty { args.append("--project=\(name)") }
         let r = WorklogRun(args).runNow()
         if r.status == 0 {
             setIcon("checkmark.circle")

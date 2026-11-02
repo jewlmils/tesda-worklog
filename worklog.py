@@ -301,22 +301,48 @@ def _when(t_start, t_end=None, ranged=False):
 
 # ---------------------------------------------------------------- manual entries
 
+GENERAL_PROJECT = "General TESDA work"   # for TESDA work that isn't part of a specific project
+
+
+def logged_projects():
+    """Project names used in manual entries, most recently used first."""
+    seen = []
+    if MANUAL_LOG.exists():
+        for line in reversed(MANUAL_LOG.read_text(encoding="utf-8").splitlines()):
+            try:
+                p = json.loads(line).get("project")
+            except (ValueError, AttributeError):
+                continue
+            if p and p not in seen:
+                seen.append(p)
+    return seen
+
+
+def log_choices(cfg):
+    """What the Log dialog offers: config projects, General, then names you've typed before."""
+    out = list(cfg["projects"]) + [GENERAL_PROJECT]
+    keys = {n.casefold() for n in out}
+    for p in logged_projects():
+        if p.casefold() not in keys:
+            out.append(p)
+            keys.add(p.casefold())
+    return out
+
+
 def match_project(name, cfg):
+    """Configured or previously used project with that name (any case), a unique partial match of a
+    configured project ("track" -> "TESDA-TRACK"), or else a NEW project with exactly that name."""
     names = list(cfg["projects"])
+    name = " ".join((name or "").split())
     if not name:
-        if names:
-            return names[0]
-        raise WorklogError("Add at least one project to config.json first.")
-    for n in names:
-        if n == name:
+        return names[0] if names else GENERAL_PROJECT
+    for n in log_choices(cfg):
+        if n.casefold() == name.casefold():
             return n
-    exact = [n for n in names if n.casefold() == name.casefold()]
-    if exact:
-        return exact[0]
     partial = [n for n in names if name.casefold() in n.casefold()]
     if len(partial) == 1:
         return partial[0]
-    raise WorklogError(f"No project called {name!r}. Projects in config.json: " + ", ".join(names))
+    return name
 
 
 def add_manual(text, project, cfg, on_day=None):
@@ -1469,12 +1495,14 @@ def main(argv=None):
     r.add_argument("--scheduled", action="store_true", help=argparse.SUPPRESS)
     lg = sub.add_parser("log", help="log something you did outside Claude Code")
     lg.add_argument("text", nargs="+")
-    lg.add_argument("--project", "-p", help="project name from config.json (default: the first one)")
+    lg.add_argument("--project", "-p", help='project: one from config.json (partial names work), '
+                    f'"{GENERAL_PROJECT}", or any new name (default: the first project)')
     lg.add_argument("--date", help="log it on another day (YYYY-MM-DD); default today")
     s = sub.add_parser("sessions", help="list the sessions captured for a day")
     s.add_argument("day", nargs="?", default="today")
     sub.add_parser("folders", help="list every folder you've used Claude Code in")
-    sub.add_parser("projects", help="list project names from config.json")
+    pr = sub.add_parser("projects", help="list project names from config.json")
+    pr.add_argument("--log", action="store_true", help=argparse.SUPPRESS)   # choices for the Log dialog (JSON)
     ar = sub.add_parser("archive", help="TESDA transcript archive: status, or export a zip copy")
     ar.add_argument("action", nargs="?", default="status", choices=["status", "export", "sync"])
     rs = sub.add_parser("resolve", help=argparse.SUPPRESS)
@@ -1496,14 +1524,20 @@ def main(argv=None):
             cmd_report(args, cfg)
         elif args.cmd == "log":
             day = resolve_day(args.date, cfg) if args.date else None
+            known = {n.casefold() for n in log_choices(cfg)}
             e = add_manual(" ".join(args.text), args.project, cfg, day)
-            print(f"Logged to {e['project']}: {e['text']}")
+            new = "" if e["project"].casefold() in known else " (new project)"
+            print(f"Logged to {e['project']}{new}: {e['text']}")
         elif args.cmd == "sessions":
             cmd_sessions(args, cfg)
         elif args.cmd == "folders":
             cmd_folders(args, cfg)
         elif args.cmd == "projects":
-            print("\n".join(cfg["projects"]))
+            if args.log:
+                used = logged_projects()
+                print(json.dumps({"choices": log_choices(cfg), "last": used[0] if used else None}, ensure_ascii=False))
+            else:
+                print("\n".join(cfg["projects"]))
         elif args.cmd == "archive":
             cmd_archive(args, cfg)
         elif args.cmd == "resolve":

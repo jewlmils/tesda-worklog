@@ -963,7 +963,7 @@ def raw_body(day, tesda, manual, warning=None, end=None, workdays=None, commits=
     return "\n".join(out).rstrip() + "\n"
 
 
-def appendix(review, tesda, generated_at, ai_status, cfg, ranged=False, git_warnings=()):
+def appendix(review, tesda, generated_at, ai_status, cfg, ranged=False, git_warnings=(), commits=None):
     out = []
     if git_warnings:
         out += ["---", "", "## Git", ""] + [f"- {w}" for w in git_warnings] + [""]
@@ -984,6 +984,16 @@ def appendix(review, tesda, generated_at, ai_status, cfg, ranged=False, git_warn
             out.append(f"| {_when(s['start'], s['end'], ranged)} | {s['project']} | `{Path(s['cwd']).name}` "
                        f"| {len(s['prompts'])} | {len(s['files'])}"
                        + (f" + {len(s['shell_edits'])} shell edit(s)" if s["shell_edits"] else "") + " |")
+        out.append("")
+    all_c = sorted((c for cs in (commits or {}).values() for c in cs), key=lambda c: c["t"])
+    if all_c:
+        out += ["---", "", "## Commits used", "",
+                "| Time | Project | Commit | Branch | Changes |", "|---|---|---|---|---|"]
+        for c in all_c:
+            subject = c["subject"].replace("|", "\\|")
+            out.append(f"| {_when(c['t'], ranged=ranged)} | {c['project']} | {subject} (`{c['hash'][:7]}`) "
+                       f"| `{c['branch'] or '-'}` | {c['files']} file{'s' if c['files'] != 1 else ''}, "
+                       f"+{c['ins']}/−{c['dels']} |")
         out.append("")
     how = {"ok": f"AI summary by Claude ({cfg.get('model') or 'default model'})", "failed": "AI summary failed",
            "off": "no AI", "empty": "nothing to summarise"}.get(ai_status, ai_status)
@@ -1225,7 +1235,7 @@ def build_report(day, cfg, use_ai=True, projects_dir=None, end=None):
             body = raw_body(day, tesda, manual, end=end, workdays=cfg["_workdays"], commits=commits)
 
         now = datetime.now()
-        md = body.rstrip() + "\n\n" + APPENDIX_MARK + "\n" + appendix(review, tesda, now, ai_status, cfg, ranged, git_warnings)
+        md = body.rstrip() + "\n\n" + APPENDIX_MARK + "\n" + appendix(review, tesda, now, ai_status, cfg, ranged, git_warnings, commits)
         paths, warning = report_paths(day, cfg, end)
         try:
             _atomic_write(paths["md"], md)

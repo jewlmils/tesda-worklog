@@ -137,7 +137,11 @@ Commits are the strongest evidence that something is *done*, and they cover work
 
 It then reads the commits **you** authored on the report day(s), by author date in local time. It reads all local and remote branches, skipping merges and stashes. Matching uses your repo's `user.email` plus `git_authors`.
 
-They're listed as evidence, and Claude turns them into plain-language accomplishments. A commit can also show that something a Claude session left unfinished was completed later. Everything is read-only (`git log` / `git config`). A repo on an unplugged drive is skipped, with a note at the bottom of the report. Check what's found with `worklog commits 2026-11-02`.
+They're listed as evidence, and Claude turns them into plain-language accomplishments. A commit can also show that something a Claude session left unfinished was completed later. Everything is read-only (`git log` / `git config`). A repo on an unplugged drive is skipped, with a note at the bottom of the report. **How to check it's working:**
+- The summary line (notification, window status, CLI) says e.g. *"4 sessions, 0 logged items, **4 commits** · 2 to review"*.
+- Every report ends with a **Commits used** table (time, project, commit + hash, branch, changes). Like *Sessions used*, it isn't part of what Copy puts on the clipboard.
+- `worklog report DAY --no-ai` shows the raw evidence, including a **Git commits** list per project.
+- `worklog commits DAY` lists the repos it searches and the commits it finds.
 
 ## TESDA history (6-month archive)
 

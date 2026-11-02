@@ -468,6 +468,10 @@ class GitCommits(unittest.TestCase):
     def test_summary_mentions_commits(self):
         meta = worklog.build_report(FRI, self.cfg(), use_ai=False)
         self.assertIn(", 3 commits ·", worklog.summary_line(meta))
+        appendix = Path(meta["md"]).read_text().split(worklog.APPENDIX_MARK)[1]
+        self.assertIn("## Commits used", appendix)
+        self.assertIn("[FIX] Fallback sheet", appendix)
+        self.assertNotIn("Commits used", Path(meta["txt"]).read_text())       # not in what you paste
 
 
 class Scheduled(unittest.TestCase):

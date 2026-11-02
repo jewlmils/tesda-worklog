@@ -136,7 +136,25 @@ let isoDay: DateFormatter = {
     return f
 }()
 
+/// "Monday, November 2, 2026", or "October 26 – November 10, 2026" for a range key (A_to_B).
 func prettyDay(_ day: String) -> String {
+    let parts = day.components(separatedBy: "_to_")
+    if parts.count == 2, let a = isoDay.date(from: parts[0]), let b = isoDay.date(from: parts[1]) {
+        let cal = Calendar.current
+        let f = DateFormatter()
+        if cal.component(.year, from: a) != cal.component(.year, from: b) {
+            f.dateFormat = "MMMM d, yyyy"
+            return "\(f.string(from: a)) – \(f.string(from: b))"
+        }
+        f.dateFormat = "MMMM d"
+        let left = f.string(from: a)
+        f.dateFormat = cal.component(.month, from: a) == cal.component(.month, from: b) ? "d, yyyy" : "MMMM d, yyyy"
+        return "\(left) – \(f.string(from: b))"
+    }
+    return prettyOneDay(day)
+}
+
+func prettyOneDay(_ day: String) -> String {
     guard let d = isoDay.date(from: day) else { return day }
     let f = DateFormatter()
     f.dateFormat = "EEEE, MMMM d, yyyy"
@@ -176,7 +194,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             exit(0)
         }
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        setIcon("list.checklist")
+        setIcon(nil)
         statusItem.button?.toolTip = "TESDA Worklog"
 
         let menu = NSMenu()
@@ -215,11 +233,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return i
     }
 
-    func setIcon(_ symbol: String) {
-        if let img = NSImage(systemSymbolName: symbol, accessibilityDescription: "TESDA Worklog") {
+    /// nil = the octopus. A template image: macOS draws it white or black to match the menu bar.
+    func setIcon(_ symbol: String?) {
+        var img: NSImage? = nil
+        if let symbol = symbol {
+            img = NSImage(systemSymbolName: symbol, accessibilityDescription: "TESDA Worklog")
+        } else if let octopus = Bundle.main.image(forResource: "MenuIcon") {
+            octopus.size = NSSize(width: 20, height: 18)
+            img = octopus
+        } else {
+            img = NSImage(systemSymbolName: "list.checklist", accessibilityDescription: "TESDA Worklog")
+        }
+        if let img = img {
             img.isTemplate = true
             statusItem.button?.image = img
+            statusItem.button?.title = ""
         } else {
+            statusItem.button?.image = nil
             statusItem.button?.title = "TW"
         }
     }
@@ -315,7 +345,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let r = WorklogRun(args).runNow()
         if r.status == 0 {
             setIcon("checkmark.circle")
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { self.setIcon("list.checklist") }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { self.setIcon(nil) }
         } else {
             let err = NSAlert()
             err.messageText = "Couldn't save that entry"
@@ -389,7 +419,9 @@ final class ReportWindowController: NSObject, NSWindowDelegate, WKNavigationDele
     unowned let app: AppDelegate
     let window: NSWindow
     let periodPopup = NSPopUpButton()
-    let datePicker = NSDatePicker()
+    let datePicker = NSDatePicker()          // "Pick a date", or the start of a range
+    let toLabel = NSTextField(labelWithString: "to")
+    let toPicker = NSDatePicker()            // end of a range
     let generateButton = NSButton(title: "Generate", target: nil, action: nil)
     let statusLabel = NSTextField(labelWithString: "")
     let bannerBox = NSView()
@@ -426,7 +458,7 @@ final class ReportWindowController: NSObject, NSWindowDelegate, WKNavigationDele
     // ---- layout
 
     private func buildUI() {
-        periodPopup.addItems(withTitles: ["Today so far", "Previous workday", "Pick a date"])
+        periodPopup.addItems(withTitles: ["Today so far", "Previous workday", "Pick a date", "Date range"])
         periodPopup.target = self
         periodPopup.action = #selector(periodChanged)
         datePicker.datePickerStyle = .textFieldAndStepper
@@ -436,11 +468,17 @@ final class ReportWindowController: NSObject, NSWindowDelegate, WKNavigationDele
         datePicker.isHidden = true
         datePicker.target = self
         datePicker.action = #selector(periodChanged)
+        toPicker.datePickerStyle = .textFieldAndStepper
+        toPicker.datePickerElements = .yearMonthDay
+        toPicker.dateValue = Date()
+        toPicker.maxDate = Date()
+        toPicker.target = self
+        toPicker.action = #selector(periodChanged)
         generateButton.keyEquivalent = "\r"
         generateButton.bezelStyle = .rounded
 
         let periodLabel = NSTextField(labelWithString: "Report for:")
-        let top = NSStackView(views: [periodLabel, periodPopup, datePicker, NSView(), generateButton])
+        let top = NSStackView(views: [periodLabel, periodPopup, datePicker, toLabel, toPicker, NSView(), generateButton])
         top.orientation = .horizontal
         top.spacing = 8
 
@@ -564,7 +602,14 @@ final class ReportWindowController: NSObject, NSWindowDelegate, WKNavigationDele
             periodPopup.selectItem(at: 2)
             if let d = isoDay.date(from: day) { datePicker.dateValue = d }
         }
-        datePicker.isHidden = periodPopup.indexOfSelectedItem != 2
+        updatePickers()
+    }
+
+    private func updatePickers() {
+        let i = periodPopup.indexOfSelectedItem
+        datePicker.isHidden = i < 2
+        toLabel.isHidden = i != 3
+        toPicker.isHidden = i != 3
     }
 
     private func resolve(_ word: String) -> String? {
@@ -577,14 +622,22 @@ final class ReportWindowController: NSObject, NSWindowDelegate, WKNavigationDele
         switch periodPopup.indexOfSelectedItem {
         case 0: return isoDay.string(from: Date())
         case 1: return resolve("prev")
-        default: return isoDay.string(from: datePicker.dateValue)
+        case 2: return isoDay.string(from: datePicker.dateValue)
+        default:   // a range; the two dates may be in either order
+            let a = isoDay.string(from: min(datePicker.dateValue, toPicker.dateValue))
+            let b = isoDay.string(from: max(datePicker.dateValue, toPicker.dateValue))
+            return a == b ? a : "\(a)_to_\(b)"
         }
     }
 
     // ---- actions
 
     @objc func periodChanged() {
-        datePicker.isHidden = periodPopup.indexOfSelectedItem != 2
+        if periodPopup.indexOfSelectedItem == 3 && datePicker.dateValue >= toPicker.dateValue {
+            // Switching to a range: start it a week back so the two pickers aren't identical.
+            datePicker.dateValue = Calendar.current.date(byAdding: .day, value: -7, to: toPicker.dateValue) ?? datePicker.dateValue
+        }
+        updatePickers()
         guard run == nil, let day = selectedDay() else { return }
         if let meta = app.paths.meta(day) {
             statusLabel.stringValue = "\(prettyDay(day)) · a saved report exists (\(generatedNote(meta).lowercased())). Click Generate to view it."
@@ -647,7 +700,7 @@ final class ReportWindowController: NSObject, NSWindowDelegate, WKNavigationDele
         progressStack.isHidden = false
         spinner.startAnimation(nil)
         app.windowBusy = true
-        let r = WorklogRun(["report", day, "--json"])
+        let r = WorklogRun(["report", day.replacingOccurrences(of: "_to_", with: ".."), "--json"])
         run = r
         updateButtons()
         r.start { [weak self] result in self?.finished(day: day, result) }
@@ -751,6 +804,7 @@ final class ReportWindowController: NSObject, NSWindowDelegate, WKNavigationDele
         generateButton.isEnabled = !busy
         periodPopup.isEnabled = !busy
         datePicker.isEnabled = !busy
+        toPicker.isEnabled = !busy
         copyButton.isEnabled = has
         openButton.isEnabled = has
         regenerateButton.isEnabled = !busy && (currentDay != nil)
@@ -777,7 +831,7 @@ final class ReportWindowController: NSObject, NSWindowDelegate, WKNavigationDele
     /// Frames of the main controls in window coordinates (y grows upwards), to sanity-check the layout.
     func layout() -> [String: [Int]] {
         var out: [String: [Int]] = ["window": [0, 0, Int(window.contentView?.bounds.width ?? 0), Int(window.contentView?.bounds.height ?? 0)]]
-        let views: [String: NSView] = ["period": periodPopup, "datePicker": datePicker, "generate": generateButton,
+        let views: [String: NSView] = ["period": periodPopup, "datePicker": datePicker, "toPicker": toPicker, "generate": generateButton,
             "status": statusLabel, "banner": bannerBox, "web": webView, "progress": progressStack, "placeholder": placeholder,
             "copy": copyButton, "open": openButton, "regenerate": regenerateButton, "close": closeButton]
         for (name, v) in views where !v.isHidden && v.superview != nil {
@@ -792,6 +846,8 @@ final class ReportWindowController: NSObject, NSWindowDelegate, WKNavigationDele
             "windowVisible": window.isVisible,
             "period": periodPopup.titleOfSelectedItem ?? "",
             "datePickerVisible": !datePicker.isHidden,
+            "toPickerVisible": !toPicker.isHidden,
+            "menuIcon": app.statusItem.button?.image?.isTemplate == true ? "image" : (app.statusItem.button?.title ?? ""),
             "status": statusLabel.stringValue,
             "bannerVisible": !bannerBox.isHidden,
             "banner": bannerLabel.stringValue,
@@ -839,6 +895,7 @@ final class Automation {
         case "period":
             w.periodPopup.selectItem(at: c["index"] as? Int ?? 0)
             if let d = c["date"] as? String, let date = isoDay.date(from: d) { w.datePicker.dateValue = date }
+            if let d = c["to"] as? String, let date = isoDay.date(from: d) { w.toPicker.dateValue = date }
             w.periodChanged()
         case "click":
             let buttons = ["generate": w.generateButton, "cancel": w.cancelButton, "copy": w.copyButton,

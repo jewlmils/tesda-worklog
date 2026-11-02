@@ -36,11 +36,12 @@ CLAUDE="$(command -v claude || true)"
 mkdir -p "$APP/logs" "$APP/inbox" "$AGENTS" "$BIN_DIR"
 cp "$SRC/worklog.py" "$APP/.worklog.py.new" && mv "$APP/.worklog.py.new" "$APP/worklog.py"
 say "Building TESDA Worklog.app (takes ~30 s)…"
-[ -f "$SRC/assets/AppIcon.icns" ] || swift "$SRC/assets/make_icon.swift"
+[ -f "$SRC/assets/AppIcon.icns" ] && [ -f "$SRC/assets/MenuIcon@2x.png" ] || swift "$SRC/assets/make_icon.swift"
 mkdir -p "$BUNDLE/Contents/MacOS" "$BUNDLE/Contents/Resources"
 swiftc -O "$SRC/menubar.swift" -o "$BUNDLE/Contents/MacOS/.TESDAWorklog.new"
 mv "$BUNDLE/Contents/MacOS/.TESDAWorklog.new" "$BUNDLE/Contents/MacOS/TESDAWorklog"
 cp "$SRC/assets/AppIcon.icns" "$BUNDLE/Contents/Resources/AppIcon.icns"
+cp "$SRC/assets/MenuIcon.png" "$SRC/assets/MenuIcon@2x.png" "$BUNDLE/Contents/Resources/"
 cat > "$BUNDLE/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

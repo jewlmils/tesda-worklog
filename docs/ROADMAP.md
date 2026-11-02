@@ -6,9 +6,9 @@ Next steps toward the long-term vision, roughly in the order they pay off. Each 
 
 TESDA transcripts are already archived until Jun 30 / Dec 31. Next, snapshot each day's *evidence* into `reports/YYYY-MM-DD.evidence.json` when a report is generated. It's tiny, it survives the purge, and it would let a semester report (IPCR-style) be rebuilt even after the archive is emptied. It also makes summaries reproducible.
 
-## 2. Weekly, monthly and custom reports
+## 2. Weekly and monthly shortcuts (custom ranges are done)
 
-- `worklog report --week [DATE]`, `--month 2026-10`, `--from A --to B`.
+- Custom date ranges already work (`worklog report A..B`, and **Date range** in the window). Next: shortcuts `--week [DATE]`, `--month 2026-10`.
 - Summarise from the **daily reports + manual entries**, not raw transcripts. That's smaller, already reviewed, and survives transcript cleanup. Fall back to transcripts for days without a report.
 - Window: add *This week*, *Last week*, *This month* and *Range…* to the period picker.
 - Prompt: group by project, then by theme (features, fixes, QA, coordination). Count deliverables, not hours.

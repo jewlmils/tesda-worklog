@@ -4,6 +4,7 @@ TESDA Worklog: turns your Claude Code history and your own notes into a daily
 accomplishment report for TESDA.
 
   worklog report [prev|today|yesterday|YYYY-MM-DD] [--no-ai] [--open] [--json]
+  worklog report 2026-10-26..2026-11-10        one report for a date range
   worklog log "Attended TRACK sprint planning" [--project=NAME] [--date=YYYY-MM-DD]
   worklog sessions [DAY]     what was captured that day and how it was classified
   worklog folders            every folder you've used Claude Code in
@@ -256,6 +257,48 @@ def pretty_day(day):
     return f"{day:%A}, {day:%B} {day.day}, {day.year}"
 
 
+MAX_RANGE_DAYS = 366
+
+
+def pretty_period(start, end=None):
+    """'Monday, November 2, 2026' for one day; 'October 26 – November 10, 2026' for a range."""
+    end = end or start
+    if start == end:
+        return pretty_day(start)
+    if start.year != end.year:
+        return f"{start:%B} {start.day}, {start.year} – {end:%B} {end.day}, {end.year}"
+    if start.month != end.month:
+        return f"{start:%B} {start.day} – {end:%B} {end.day}, {end.year}"
+    return f"{start:%B} {start.day} – {end.day}, {end.year}"
+
+
+def period_key(start, end=None):
+    """File name stem: 2026-11-02, or 2026-10-26_to_2026-11-10 for a range."""
+    end = end or start
+    return start.isoformat() if start == end else f"{start.isoformat()}_to_{end.isoformat()}"
+
+
+def resolve_period(arg, cfg, today=None):
+    """'prev', 'today', a date, or a range 'YYYY-MM-DD..YYYY-MM-DD'. Returns (start, end)."""
+    today = today or date.today()
+    a = (arg or "prev").strip()
+    if ".." in a:
+        left, right = (x.strip() for x in a.split("..", 1))
+        start, end = resolve_day(left, cfg, today), resolve_day(right or "today", cfg, today)
+        if end < start:
+            start, end = end, start
+        if (end - start).days + 1 > MAX_RANGE_DAYS:
+            raise WorklogError(f"That range is {(end - start).days + 1} days; the maximum is {MAX_RANGE_DAYS}.")
+        return start, end
+    d = resolve_day(a, cfg, today)
+    return d, d
+
+
+def _when(t_start, t_end=None, ranged=False):
+    span = f"{t_start:%H:%M}" + (f"–{t_end:%H:%M}" if t_end is not None else "")
+    return f"{t_start:%a %b} {t_start.day} {span}" if ranged else span
+
+
 # ---------------------------------------------------------------- manual entries
 
 def match_project(name, cfg):
@@ -290,7 +333,8 @@ def add_manual(text, project, cfg, on_day=None):
     return entry
 
 
-def read_manual(day):
+def read_manual(day, end=None):
+    end = end or day
     out = []
     if not MANUAL_LOG.exists():
         return out
@@ -300,7 +344,7 @@ def read_manual(day):
         except json.JSONDecodeError:
             continue
         t = local_time(e.get("ts")) if isinstance(e, dict) else None
-        if t and t.date() == day and e.get("text"):
+        if t and day <= t.date() <= end and e.get("text"):
             e["_t"] = t
             e["project"] = e.get("project") or "General"
             out.append(e)
@@ -338,11 +382,13 @@ def _rel(path, cwd):
     return path
 
 
-def read_sessions(day, projects_dir=None):
-    """One record per Claude Code session, using only the messages whose LOCAL date is `day`.
+def read_sessions(day, projects_dir=None, end=None):
+    """One record per Claude Code session per LOCAL day, for `day` (or every day from `day` to `end`).
 
     A session that runs past midnight therefore shows up on both days, each with its own part.
+    One pass over the transcripts, however long the range.
     """
+    end = end or day
     projects_dir = Path(projects_dir or CLAUDE_PROJECTS)
     day_start = datetime.combine(day, dtime.min).timestamp()
     sessions, titles, seen = {}, {}, set()
@@ -381,13 +427,13 @@ def read_sessions(day, projects_dir=None):
                     seen.add(uid)
                 t = local_time(e.get("timestamp"))
                 cwd = e.get("cwd")
-                if t is None or t.date() != day or not cwd:
+                if t is None or not (day <= t.date() <= end) or not cwd:
                     continue
                 sid = e.get("sessionId") or f.stem
-                s = sessions.get(sid)
+                s = sessions.get((t.date(), sid))
                 if s is None:
-                    s = sessions[sid] = {
-                        "id": sid, "cwd": cwd, "branch": "", "start": t, "end": t, "title": "",
+                    s = sessions[(t.date(), sid)] = {
+                        "id": sid, "day": t.date(), "cwd": cwd, "branch": "", "start": t, "end": t, "title": "",
                         "prompts": [], "_files": [], "_commands": [], "last_reply": "", "transcript": str(f),
                     }
                 s["start"], s["end"] = min(s["start"], t), max(s["end"], t)
@@ -485,9 +531,9 @@ def _project_order(tesda, manual):
     return list(dict.fromkeys(list(tesda) + [m["project"] for m in manual]))
 
 
-def _session_evidence(s, max_prompts, prompt_len):
+def _session_evidence(s, max_prompts, prompt_len, ranged=False):
     title = f' "{s["title"]}"' if s["title"] else ""
-    out = [f"--- Claude Code session{title} | {s['start']:%H:%M}-{s['end']:%H:%M} | "
+    out = [f"--- Claude Code session{title} | {_when(s['start'], s['end'], ranged)} | "
            f"folder {s['cwd']} | branch {s['branch'] or '-'}"]
     prompts = [clip(p, prompt_len) for p in s["prompts"]]
     if len(prompts) > max_prompts:
@@ -513,18 +559,20 @@ def _session_evidence(s, max_prompts, prompt_len):
     return out
 
 
-def evidence_text(day, tesda, manual, budget=60000):
+def evidence_text(day, tesda, manual, budget=None, end=None):
     """Plain-text evidence. Only TESDA projects and manual entries; Needs-review sessions are never included."""
-    for max_prompts, prompt_len in ((15, 600), (8, 300), (4, 160)):
-        out = [f"EVIDENCE FOR {pretty_day(day).upper()}", ""]
+    ranged = bool(end and end != day)
+    budget = budget or (100000 if ranged else 60000)
+    for max_prompts, prompt_len in ((15, 600), (8, 300), (4, 160), (2, 100)):
+        out = [f"EVIDENCE FOR {pretty_period(day, end).upper()}", ""]
         for project in _project_order(tesda, manual):
             out.append(f"=== PROJECT: {project} ===")
             mine = [m for m in manual if m["project"] == project]
             if mine:
                 out.append("Logged by the user (true and done):")
-                out += [f"  - [{m['_t']:%H:%M}] {m['text']}" for m in mine]
+                out += [f"  - [{_when(m['_t'], ranged=ranged)}] {m['text']}" for m in mine]
             for s in tesda.get(project, []):
-                out += _session_evidence(s, max_prompts, prompt_len)
+                out += _session_evidence(s, max_prompts, prompt_len, ranged)
             out.append("")
         text = "\n".join(out)
         if len(text) <= budget:
@@ -532,11 +580,11 @@ def evidence_text(day, tesda, manual, budget=60000):
     return text[:budget] + "\n(… evidence truncated …)"
 
 
-AI_PROMPT = """You are writing a daily accomplishment report for a software developer at TESDA \
+AI_PROMPT = """You are writing {kind} for a software developer at TESDA \
 (the Philippines' Technical Education and Skills Development Authority). It will be pasted into \
 an official work log, so it must be accurate.
 
-The evidence for {day} is included in this message, grouped by project. There are two kinds:
+The evidence for {period} is included in this message, grouped by project. There are two kinds:
 1. "Logged by the user": entries the user typed by hand (meetings, QA, coordination, documentation…). \
 Treat them as true and completed unless the text says otherwise.
 2. "Claude Code session": what the user asked their AI coding assistant to do, the files that were \
@@ -544,7 +592,7 @@ changed, notable commands (✓ succeeded / ✗ failed), and the assistant's fina
 
 Write the report in Markdown, in English, in exactly this shape:
 
-# Daily Accomplishment Report — {day}
+{title}
 
 ## <Project name>
 
@@ -570,7 +618,26 @@ such as "successfully", "seamlessly", "robust", "comprehensive".
 5. Keep useful technical detail (feature, screen, component, endpoint, bug), but leave out file \
 paths, session IDs and tool names unless they matter. Merge duplicates. Skip chit-chat, plain \
 questions, and setup problems that led nowhere.
-6. Output only the report: no preamble, no closing remarks, no code fences."""
+6. Output only the report: no preamble, no closing remarks, no code fences.{extra}"""
+
+RANGE_RULE = """
+7. This report covers several days. Merge related work across days into one bullet per piece \
+of work, grouped by project; don't list day by day. Add a date in parentheses only when it \
+matters (for example a release or a meeting)."""
+
+
+def report_title(start, end=None):
+    if end and end != start:
+        return f"# Accomplishment Report — {pretty_period(start, end)}"
+    return f"# Daily Accomplishment Report — {pretty_day(start)}"
+
+
+def build_prompt(start, end=None):
+    ranged = bool(end and end != start)
+    return AI_PROMPT.format(kind="an accomplishment report covering several days" if ranged
+                            else "a daily accomplishment report",
+                            period=pretty_period(start, end), title=report_title(start, end),
+                            extra=RANGE_RULE if ranged else "")
 
 
 def find_claude(cfg):
@@ -592,12 +659,12 @@ def _explain_claude_failure(code, out, err):
     return f"`claude` exited with code {code}: {said}"
 
 
-def ask_claude(evidence, day, cfg):
+def ask_claude(evidence, prompt, cfg):
     exe = find_claude(cfg)
     if not exe:
         raise WorklogError("couldn't find the `claude` command. Run `which claude` in Terminal and put "
                            "the result in config.json as \"claude_path\".")
-    cmd = [exe, "-p", AI_PROMPT.format(day=pretty_day(day)), "--no-session-persistence", "--tools", ""]
+    cmd = [exe, "-p", prompt, "--no-session-persistence", "--tools", ""]
     if cfg.get("model"):
         cmd += ["--model", str(cfg["model"])]
     # If we're started from inside a Claude Code session, don't let the child think it's nested.
@@ -637,8 +704,9 @@ def clean_ai_output(text, title):
 
 # ---------------------------------------------------------------- report text
 
-def raw_body(day, tesda, manual, warning=None):
-    out = [f"# Daily Accomplishment Report — {pretty_day(day)}", ""]
+def raw_body(day, tesda, manual, warning=None, end=None):
+    ranged = bool(end and end != day)
+    out = [report_title(day, end), ""]
     if warning:
         out += [f"> ⚠️ **The AI summary couldn't be written:** {warning}", ">",
                 "> Below is the raw evidence instead. Fix the problem and regenerate, or write the bullets yourself.", ""]
@@ -648,14 +716,14 @@ def raw_body(day, tesda, manual, warning=None):
         out += [f"## {project}", ""]
         mine = [m for m in manual if m["project"] == project]
         if mine:
-            out += ["**Logged by you**"] + [f"- {m['_t']:%H:%M} — {m['text']}" for m in mine] + [""]
+            out += ["**Logged by you**"] + [f"- {_when(m['_t'], ranged=ranged)} — {m['text']}" for m in mine] + [""]
         ss = tesda.get(project, [])
         if ss:
             out.append("**Claude Code sessions**")
             for s in ss:
                 head = s["title"] or (clip(s["prompts"][0], 90) if s["prompts"] else "Session")
                 branch = f" · branch `{s['branch']}`" if s["branch"] else ""
-                out.append(f"- **{head}** · {s['start']:%H:%M}–{s['end']:%H:%M}{branch}")
+                out.append(f"- **{head}** · {_when(s['start'], s['end'], ranged)}{branch}")
                 if s["prompts"]:
                     more = f" (+{len(s['prompts']) - 1} more requests)" if len(s["prompts"]) > 1 else ""
                     out.append(f"  - Asked: “{clip(s['prompts'][0], 200)}”{more}")
@@ -674,7 +742,7 @@ def raw_body(day, tesda, manual, warning=None):
     return "\n".join(out).rstrip() + "\n"
 
 
-def appendix(review, tesda, generated_at, ai_status, cfg):
+def appendix(review, tesda, generated_at, ai_status, cfg, ranged=False):
     out = []
     if review:
         out += ["---", "", "## Needs review", "",
@@ -683,14 +751,14 @@ def appendix(review, tesda, generated_at, ai_status, cfg):
                 "regenerate, or log it by hand._", ""]
         for s in review:
             what = s["title"] or (clip(s["prompts"][0], 100) if s["prompts"] else "(no prompts)")
-            out.append(f"- `{s['cwd']}` · {s['start']:%H:%M}–{s['end']:%H:%M} · {what}")
+            out.append(f"- `{s['cwd']}` · {_when(s['start'], s['end'], ranged)} · {what}")
         out.append("")
     all_s = [s for ss in tesda.values() for s in ss]
     if all_s:
         out += ["---", "", "## Sessions used", "",
                 "| Time | Project | Folder | Requests | Files changed |", "|---|---|---|---|---|"]
         for s in sorted(all_s, key=lambda s: s["start"]):
-            out.append(f"| {s['start']:%H:%M}–{s['end']:%H:%M} | {s['project']} | `{Path(s['cwd']).name}` "
+            out.append(f"| {_when(s['start'], s['end'], ranged)} | {s['project']} | `{Path(s['cwd']).name}` "
                        f"| {len(s['prompts'])} | {len(s['files'])}"
                        + (f" + {len(s['shell_edits'])} shell edit(s)" if s["shell_edits"] else "") + " |")
         out.append("")
@@ -876,15 +944,15 @@ def _atomic_write(path, text):
         raise
 
 
-def report_paths(day, cfg):
+def report_paths(day, cfg, end=None):
     folder, warning = reports_dir(cfg)
-    base = folder / day.isoformat()
+    base = folder / period_key(day, end)
     return {"md": base.with_suffix(".md"), "html": base.with_suffix(".html"),
             "txt": base.with_suffix(".txt"), "json": base.with_suffix(".json")}, warning
 
 
-def read_meta(day, cfg):
-    paths, _ = report_paths(day, cfg)
+def read_meta(day, cfg, end=None):
+    paths, _ = report_paths(day, cfg, end)
     try:
         meta = json.loads(paths["json"].read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -895,37 +963,45 @@ def read_meta(day, cfg):
     return meta
 
 
-def build_report(day, cfg, use_ai=True, projects_dir=None):
-    """Collects evidence for `day`, writes YYYY-MM-DD.{md,html,txt,json}, returns the metadata dict."""
-    _mark_running(day)
+def build_report(day, cfg, use_ai=True, projects_dir=None, end=None):
+    """Collects evidence for `day` (or `day`..`end`), writes <key>.{md,html,txt,json}, returns the metadata.
+
+    <key> is YYYY-MM-DD, or YYYY-MM-DD_to_YYYY-MM-DD for a range.
+    """
+    end = end or day
+    if end < day:
+        day, end = end, day
+    ranged = end != day
+    _mark_running(period_key(day, end))
     try:
         try:
             archive_sync(cfg, projects_dir)
         except OSError:
             pass
-        sessions = read_sessions(day, projects_dir)
+        sessions = read_sessions(day, projects_dir, end=end)
         tesda, review, _excluded = group(sessions, cfg)
-        manual = read_manual(day)
-        title = f"# Daily Accomplishment Report — {pretty_day(day)}"
+        manual = read_manual(day, end)
+        title = report_title(day, end)
         error = None
         if not tesda and not manual:
             ai_status = "empty"
-            body = (f"{title}\n\n_No TESDA work was captured for this day: no Claude Code sessions in your "
-                    "TESDA folders and nothing logged by hand._\n")
+            body = (f"{title}\n\n_No TESDA work was captured for this {'period' if ranged else 'day'}: no Claude "
+                    "Code sessions in your TESDA folders and nothing logged by hand._\n")
         elif use_ai:
             try:
-                body = clean_ai_output(ask_claude(evidence_text(day, tesda, manual), day, cfg), title)
+                evidence = evidence_text(day, tesda, manual, end=end)
+                body = clean_ai_output(ask_claude(evidence, build_prompt(day, end), cfg), title)
                 ai_status = "ok"
             except WorklogError as ex:
                 ai_status, error = "failed", str(ex)
-                body = raw_body(day, tesda, manual, warning=error)
+                body = raw_body(day, tesda, manual, warning=error, end=end)
         else:
             ai_status = "off"
-            body = raw_body(day, tesda, manual)
+            body = raw_body(day, tesda, manual, end=end)
 
         now = datetime.now()
-        md = body.rstrip() + "\n\n" + APPENDIX_MARK + "\n" + appendix(review, tesda, now, ai_status, cfg)
-        paths, warning = report_paths(day, cfg)
+        md = body.rstrip() + "\n\n" + APPENDIX_MARK + "\n" + appendix(review, tesda, now, ai_status, cfg, ranged)
+        paths, warning = report_paths(day, cfg, end)
         try:
             _atomic_write(paths["md"], md)
         except PermissionError as ex:
@@ -935,14 +1011,15 @@ def build_report(day, cfg, use_ai=True, projects_dir=None):
             warning = f"macOS didn't allow writing to {folder} ({ex.strerror}); saved in {DEFAULT_REPORTS} instead."
             _atomic_write(paths["md"], md)
         meta = {
-            "day": day.isoformat(), "generated_at": now.isoformat(timespec="seconds"),
+            "day": period_key(day, end), "start": day.isoformat(), "end": end.isoformat(), "range": ranged,
+            "generated_at": now.isoformat(timespec="seconds"),
             "ai": ai_status, "error": error, "warning": warning, "model": cfg.get("model"),
             "sessions": sum(len(v) for v in tesda.values()), "manual": len(manual), "review": len(review),
             "projects": _project_order(tesda, manual),
             **{k: str(v) for k, v in paths.items()},
         }
         _atomic_write(paths["txt"], md_to_text(body))
-        _atomic_write(paths["html"], HTML_PAGE.format(title=html.escape(f"TESDA report — {pretty_day(day)}"),
+        _atomic_write(paths["html"], HTML_PAGE.format(title=html.escape(f"TESDA report — {pretty_period(day, end)}"),
                                                       body=md_to_html(md)))
         _atomic_write(paths["json"], json.dumps(meta, indent=2, ensure_ascii=False) + "\n")
         return meta
@@ -950,10 +1027,10 @@ def build_report(day, cfg, use_ai=True, projects_dir=None):
         _clear_running()
 
 
-def _mark_running(day):
+def _mark_running(key):
     try:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
-        RUNNING_PATH.write_text(json.dumps({"pid": os.getpid(), "day": day.isoformat()}))
+        RUNNING_PATH.write_text(json.dumps({"pid": os.getpid(), "day": key}))
     except OSError:
         pass
 
@@ -1247,12 +1324,13 @@ def cmd_report(args, cfg):
     if args.scheduled:
         run_scheduled(cfg)
         return
-    day = resolve_day(args.day, cfg)
-    meta = build_report(day, cfg, use_ai=not args.no_ai)
+    spec = args.day if not args.to else f"{args.day}..{args.to}"
+    start, end = resolve_period(spec, cfg)
+    meta = build_report(start, cfg, use_ai=not args.no_ai, end=end)
     if args.json:
         print(json.dumps({"ok": True, **meta}, ensure_ascii=False))
     else:
-        print(f"{pretty_day(day)}: {summary_line(meta)}")
+        print(f"{pretty_period(start, end)}: {summary_line(meta)}")
         if meta["error"]:
             print(f"⚠️  {meta['error']}")
         if meta["warning"]:
@@ -1318,7 +1396,9 @@ def main(argv=None):
                                 "from your Claude Code history and manual notes.")
     sub = p.add_subparsers(dest="cmd", metavar="{report,log,sessions,folders,projects,archive,paths}")
     r = sub.add_parser("report", help="build a report (default: previous workday)")
-    r.add_argument("day", nargs="?", default="prev", help="prev (default), today, yesterday or YYYY-MM-DD")
+    r.add_argument("day", nargs="?", default="prev",
+                   help="prev (default), today, yesterday, YYYY-MM-DD, or a range YYYY-MM-DD..YYYY-MM-DD")
+    r.add_argument("--to", help="end of a date range (same as DAY..TO)")
     r.add_argument("--no-ai", action="store_true", help="skip Claude; just list the raw evidence")
     r.add_argument("--open", action="store_true", help="show the report when done")
     r.add_argument("--json", action="store_true", help="print the result as JSON (used by the menu bar app)")
@@ -1363,7 +1443,7 @@ def main(argv=None):
         elif args.cmd == "archive":
             cmd_archive(args, cfg)
         elif args.cmd == "resolve":
-            print(resolve_day(args.day, cfg).isoformat())
+            print(period_key(*resolve_period(args.day, cfg)))
         elif args.cmd == "paths":
             folder, warning = reports_dir(cfg)
             paths = {"data_dir": str(DATA_DIR), "config": str(CONFIG_PATH), "reports_dir": str(folder),

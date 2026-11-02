@@ -282,6 +282,64 @@ class Reports(unittest.TestCase):
         self.assertIn("No TESDA work was captured", Path(meta["md"]).read_text())
 
 
+class Ranges(unittest.TestCase):
+    def setUp(self):
+        if worklog.MANUAL_LOG.exists():
+            worklog.MANUAL_LOG.unlink()
+        worklog.add_manual("Attended the TRACK UAT kickoff", TRACK, cfg(), on_day=THU)
+        worklog.add_manual("Reviewed TSP release notes", TSP, cfg(), on_day=FRI)
+
+    def test_resolve_period(self):
+        c = cfg()
+        self.assertEqual(worklog.resolve_period("2026-10-26..2026-11-10", c), (date(2026, 10, 26), date(2026, 11, 10)))
+        self.assertEqual(worklog.resolve_period("2026-11-10..2026-10-26", c), (date(2026, 10, 26), date(2026, 11, 10)))
+        self.assertEqual(worklog.resolve_period("2026-10-26..", c, today=MON), (date(2026, 10, 26), MON))
+        self.assertEqual(worklog.resolve_period("today", c, today=MON), (MON, MON))
+        with self.assertRaises(worklog.WorklogError):
+            worklog.resolve_period("2025-01-01..2026-11-10", c)
+        self.assertEqual(worklog.period_key(date(2026, 10, 26), date(2026, 11, 10)), "2026-10-26_to_2026-11-10")
+        self.assertEqual(worklog.period_key(FRI, FRI), "2026-10-30")
+
+    def test_pretty_period(self):
+        self.assertEqual(worklog.pretty_period(date(2026, 10, 26), date(2026, 11, 10)), "October 26 – November 10, 2026")
+        self.assertEqual(worklog.pretty_period(date(2026, 11, 2), date(2026, 11, 10)), "November 2 – 10, 2026")
+        self.assertEqual(worklog.pretty_period(date(2026, 12, 28), date(2027, 1, 5)), "December 28, 2026 – January 5, 2027")
+
+    def test_sessions_and_entries_across_days(self):
+        ss = worklog.read_sessions(THU, end=FRI)
+        self.assertEqual(sorted((s["id"][:4], s["day"].day) for s in ss),
+                         [("aaaa", 30), ("bbbb", 29), ("bbbb", 30), ("cccc", 30), ("dddd", 30)])
+        self.assertEqual(len(worklog.read_manual(THU, FRI)), 2)
+
+    def test_range_report_no_ai(self):
+        meta = worklog.build_report(THU, cfg(), use_ai=False, end=FRI)
+        self.assertEqual((meta["day"], meta["range"], meta["sessions"], meta["manual"]),
+                         ("2026-10-29_to_2026-10-30", True, 3, 2))
+        self.assertTrue(meta["md"].endswith("2026-10-29_to_2026-10-30.md"))
+        md = Path(meta["md"]).read_text()
+        self.assertTrue(md.startswith("# Accomplishment Report — October 29 – 30, 2026"))
+        self.assertIn("Thu Oct 29 23:30–23:40", md)
+        self.assertIn("Attended the TRACK UAT kickoff", md)
+        self.assertEqual(worklog.read_meta(THU, cfg(), FRI)["day"], "2026-10-29_to_2026-10-30")
+
+    def test_range_prompt_and_evidence(self):
+        os.environ["FAKE_CLAUDE_LOG"] = str(TMP / "fake-range.json")
+        worklog.build_report(THU, cfg(claude_path=fake_claude(FAKE_OK)), use_ai=True, end=FRI)
+        call = json.loads((TMP / "fake-range.json").read_text())
+        self.assertIn("Merge related work across days", call["argv"][1])
+        self.assertIn("# Accomplishment Report — October 29 – 30, 2026", call["argv"][1])
+        self.assertIn("EVIDENCE FOR OCTOBER 29 – 30, 2026", call["stdin"])
+        self.assertIn("[Thu Oct 29", call["stdin"])
+
+    def test_daily_prompt_has_no_range_rule(self):
+        self.assertNotIn("across days", worklog.build_prompt(FRI))
+        self.assertIn("# Daily Accomplishment Report — Friday, October 30, 2026", worklog.build_prompt(FRI))
+
+    def test_cli_range(self):
+        self.assertEqual(worklog.main(["report", "2026-10-29", "--to", "2026-10-30", "--no-ai", "--json"]), 0)
+        self.assertTrue((TMP / "reports" / "2026-10-29_to_2026-10-30.html").exists())
+
+
 class Scheduled(unittest.TestCase):
     def setUp(self):
         for p in (worklog.STATE_PATH, worklog.INBOX / "show.json"):

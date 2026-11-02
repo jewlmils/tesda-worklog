@@ -46,11 +46,11 @@ flowchart TB
 |---|---|
 | `worklog.py` | The whole engine and the CLI. Reads transcripts, classifies sessions by folder, merges manual entries, builds evidence, calls `claude -p`, and writes `YYYY-MM-DD.{md,html,txt,json}`. It also handles notification and delivery, and the "should the morning job run now?" logic. Includes a ~100-line Markdown→HTML renderer, so there are no dependencies. |
 | `menubar.swift` | The menu bar icon (`list.checklist`), the *Log something…* dialog, and the *Get report now* window (period picker, spinner + Cancel, WKWebView, Copy / Open file / Regenerate / Close). It runs `worklog.py` as a background `Process`. Once a second it checks `inbox/show.json` and `running.json`. |
-| `assets/make_icon.swift` | Draws the octopus icon with AppKit and builds `AppIcon.icns` with `iconutil`. There are no image files to maintain by hand. |
+| `assets/make_icon.swift` | Draws the octopus once with AppKit and produces both the app icon (`AppIcon.icns`, white on solid blue) and the menu bar template image (`MenuIcon*.png`). There are no image files to maintain by hand. |
 | `install.sh` | Copies the app to `~/Library/Application Support/TESDA-Worklog`, compiles Swift, creates the config, the `worklog` command and the Documents link, and writes and loads both LaunchAgents. Safe to run again. |
 | `uninstall.sh` | Removes jobs, binaries and the command. Keeps data unless you pass `--all`. |
 | `tests/make_fixtures.py` | Writes synthetic transcripts that mimic the real JSONL format, including the noisy parts. |
-| `tests/test_worklog.py` | 38 stdlib `unittest` tests. Claude is replaced by a fake executable that records its arguments. |
+| `tests/test_worklog.py` | 45 stdlib `unittest` tests. Claude is replaced by a fake executable that records its arguments. |
 | `reference/` | The earlier prototype, kept for comparison. |
 
 Data files (all in the app folder): `config.json`, `manual_log.jsonl` (one JSON object per entry), `state.json` (last morning delivery, last archive purge, alerts already shown), `running.json` (the PID of a report being written), `inbox/` (requests to the menu bar app), `archive/` (copies of TESDA transcripts), `logs/`, `reports/`.
@@ -86,6 +86,8 @@ Claude Code writes one JSONL file per session. Only lines with `type` set to `us
 **The app is copied off T7.** External drives may be unmounted or asleep at 8 AM, and macOS restricts background access to removable volumes. The source stays on T7; the runnable copy, config, logs and reports live in `~/Library/Application Support`.
 
 **Reports are in the app folder, linked from Documents.** During testing, the background job was refused (`Operation not permitted`) when it tried to replace a report in `~/Documents` that Terminal had created. That's macOS privacy protection (TCC). So reports are written where no such gate applies, and `~/Documents/TESDA-Worklog/reports` is a link to them.
+
+**Date ranges are one pass, one summary.** `read_sessions(start, end=…)` reads the transcripts once and returns a record per (session, local day). The evidence labels each item with its date. For ranges the prompt adds a rule: merge related work across days into one bullet per piece of work, grouped by project, rather than a day-by-day diary. The evidence budget grows to about 100k characters and trims prompts harder if needed. Range reports are saved as `START_to_END.*`.
 
 **TESDA history: copy, don't configure.** You asked for TESDA transcripts to be kept until Jun 30 / Dec 31, and other projects to keep Claude Code's 30 days. Claude Code's `cleanupPeriodDays` is global and rolling, so it can't do that. Instead, the daily job copies transcripts from TESDA folders into the app's own `archive/`. After alerts 7 days before and on the day, it deletes them the morning after each purge date. Claude Code's settings and `~/.claude/projects` are never modified. A purged half-year isn't re-archived from transcripts that Claude Code hasn't cleaned up yet: `state.json` records the cutoff.
 

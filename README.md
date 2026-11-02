@@ -1,6 +1,6 @@
 # TESDA Worklog
 
-<img src="assets/AppIcon-1024.png" width="128" alt="TESDA Worklog icon: a white octopus holding a pen">
+<img src="assets/AppIcon-1024.png" width="128" alt="TESDA Worklog icon: a white octopus on blue">
 
 A small macOS menu bar utility. Every weekday morning it gives you a report of what you did for **TESDA** on the previous workday. You can paste it into your accomplishment form.
 
@@ -8,7 +8,7 @@ A small macOS menu bar utility. Every weekday morning it gives you a report of w
 - **Manual notes:** a *Log something…* dialog for meetings, QA, coordination and documentation.
 - **TESDA only:** only folders you list count. Anything unknown goes under *Needs review* and is never added on its own.
 - **Honest summary:** your own `claude` CLI (Claude Pro, no API key) turns the evidence into concise bullets. It never invents work, and anything unfinished goes under *In progress / attempted*.
-- **On demand:** **Get report now…** (⌘R) for today so far, the previous workday, or any date.
+- **On demand:** **Get report now…** (⌘R) for today so far, the previous workday, any date, or a **date range** (e.g. Oct 26 – Nov 10), summarised as one report.
 - **Keeps TESDA history for the half-year:** TESDA transcripts are archived until Jun 30 / Dec 31, with an alert beforehand. Other projects keep Claude Code's normal 30 days.
 
 Python 3 (standard library only) + one Swift file + launchd. No database, server, Node, or API key.
@@ -89,11 +89,11 @@ Then edit:
 
 ## Daily use
 
-### Menu bar (checklist icon)
+### Menu bar (octopus icon)
 
 | Item | What it does |
 |---|---|
-| **Get report now… ⌘R** | Opens the report window. Pick **Today so far**, **Previous workday** or **Pick a date**, then **Generate**. A spinner shows while Claude writes (up to a minute), and **Cancel** stops it. If a report for that day already exists, it's shown right away with its *Generated at* time. Claude isn't called again unless you click **Regenerate**. |
+| **Get report now… ⌘R** | Opens the report window. Pick **Today so far**, **Previous workday**, **Pick a date**, or **Date range** (From … to …), then **Generate**. A spinner shows while Claude writes (up to a minute), and **Cancel** stops it. If a report for that day already exists, it's shown right away with its *Generated at* time. Claude isn't called again unless you click **Regenerate**. |
 | **Log something… ⌘L** | One line of text + a project. It's added to that day's report and treated as true. |
 | Open reports folder | Opens the reports folder in Finder. |
 | Export TESDA history… | Zips the archived TESDA transcripts into the reports folder and shows the file in Finder. |
@@ -114,6 +114,7 @@ At 8:00 (or as soon as the Mac wakes up or you log in, if it was asleep or off) 
 worklog report                  # previous workday (Monday → Friday)
 worklog report today            # today so far
 worklog report 2026-10-30       # any date; also: yesterday, prev
+worklog report 2026-10-26..2026-11-10   # one report for a date range (or: 2026-10-26 --to 2026-11-10)
 worklog report today --no-ai    # skip Claude: just the raw evidence
 worklog report today --open     # show it in the window/browser when done
 worklog log "Attended TRACK sprint planning" --project=TRACK      # partial names work
@@ -144,7 +145,7 @@ Sessions under *Needs review* (for example, ones started in your home folder) ar
 | Source code (edit here) | `/Volumes/T7/dev/tesda-worklog/` |
 | The app (menu bar + Dock) | `~/Applications/TESDA Worklog.app` |
 | Installed `worklog.py`, `config.json`, `manual_log.jsonl`, logs | `~/Library/Application Support/TESDA-Worklog/` |
-| Reports: `YYYY-MM-DD.md`, `.html`, `.txt` (for Copy), `.json` (metadata) | `~/Library/Application Support/TESDA-Worklog/reports/`, also reachable as `~/Documents/TESDA-Worklog/reports` |
+| Reports: `YYYY-MM-DD.md` (ranges: `YYYY-MM-DD_to_YYYY-MM-DD.md`), `.html`, `.txt` (for Copy), `.json` (metadata) | `~/Library/Application Support/TESDA-Worklog/reports/`, also reachable as `~/Documents/TESDA-Worklog/reports` |
 | LaunchAgents | `~/Library/LaunchAgents/ph.tesda.worklog.report.plist`, `ph.tesda.worklog.menubar.plist` |
 | Archived TESDA transcripts (kept until Jun 30 / Dec 31) | `~/Library/Application Support/TESDA-Worklog/archive/` |
 | Your Claude Code history (read-only) | `~/.claude/projects/` |
@@ -179,10 +180,10 @@ To run it right now: `launchctl kickstart -k gui/$(id -u)/ph.tesda.worklog.repor
 ## Development
 
 ```bash
-python3 -m unittest discover -s tests -v       # 38 tests on synthetic transcripts (tests/fixtures)
+python3 -m unittest discover -s tests -v       # 45 tests on synthetic transcripts (tests/fixtures)
 python3 tests/make_fixtures.py                 # regenerate the fixtures after editing them
 swiftc -O menubar.swift -o build/TESDAWorklog  # compile check
-swift assets/make_icon.swift                   # redraw the icon (assets/AppIcon.icns + preview PNG)
+swift assets/make_icon.swift                   # redraw the icons (AppIcon.icns, menu bar MenuIcon*.png)
 ```
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how it works and [docs/ROADMAP.md](docs/ROADMAP.md) for what's next. `reference/` holds the earlier prototype this was built from.

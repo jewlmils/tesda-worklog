@@ -411,6 +411,190 @@ func openInEditor(_ url: URL) {
     try? p.run()
 }
 
+// MARK: - Mini range calendar
+
+/// Two months side by side. Click the first day, then the last day; the range is highlighted
+/// (and previewed under the mouse between the two clicks). Days after today can't be picked.
+final class RangeCalendarView: NSView {
+    private(set) var start: Date?
+    private(set) var end: Date?
+    private(set) var awaitingEnd = false
+    private var hover: Date?
+    private var month: Date                       // first day of the left-hand month
+    var onChange: ((Date, Date, Bool) -> Void)?   // (start, end, finished)
+
+    private let cal = Calendar.current
+    private let cw: CGFloat = 32, ch: CGFloat = 28, pad: CGFloat = 14, gap: CGFloat = 28
+    private let headerH: CGFloat = 34, weekH: CGFloat = 20, footerH: CGFloat = 30
+    private let prevButton = NSButton(), nextButton = NSButton()
+    private var today: Date { cal.startOfDay(for: Date()) }
+    override var isFlipped: Bool { true }
+
+    init(start: Date?, end: Date?) {
+        self.start = start.map { Calendar.current.startOfDay(for: $0) }
+        self.end = end.map { Calendar.current.startOfDay(for: $0) }
+        let anchor = Calendar.current.startOfDay(for: end ?? Date())
+        // Show the end date's month on the right, and the month before it on the left.
+        let firstOfEndMonth = Calendar.current.date(from: Calendar.current.dateComponents([.year, .month], from: anchor))!
+        month = Calendar.current.date(byAdding: .month, value: -1, to: firstOfEndMonth)!
+        super.init(frame: NSRect(x: 0, y: 0, width: pad * 2 + cw * 14 + gap,
+                                 height: headerH + weekH + ch * 6 + footerH + pad / 2))
+        for (b, sym, sel) in [(prevButton, "chevron.left", #selector(prevMonth)), (nextButton, "chevron.right", #selector(nextMonth))] {
+            b.image = NSImage(systemSymbolName: sym, accessibilityDescription: nil)
+            b.bezelStyle = .regularSquare
+            b.isBordered = false
+            b.target = self
+            b.action = sel
+            addSubview(b)
+        }
+        prevButton.frame = NSRect(x: pad - 4, y: 6, width: 24, height: 22)
+        nextButton.frame = NSRect(x: bounds.width - pad - 20, y: 6, width: 24, height: 22)
+        updateArrows()
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    @objc private func prevMonth() { month = cal.date(byAdding: .month, value: -1, to: month)!; updateArrows(); needsDisplay = true }
+    @objc private func nextMonth() { month = cal.date(byAdding: .month, value: 1, to: month)!; updateArrows(); needsDisplay = true }
+
+    private func updateArrows() {
+        let right = cal.date(byAdding: .month, value: 1, to: month)!
+        nextButton.isEnabled = right < cal.date(from: cal.dateComponents([.year, .month], from: today))!
+    }
+
+    // ---- geometry
+
+    private func monthStart(_ i: Int) -> Date { cal.date(byAdding: .month, value: i, to: month)! }
+    private func originX(_ i: Int) -> CGFloat { pad + CGFloat(i) * (cw * 7 + gap) }
+
+    /// (date, cell rect) for every day shown.
+    private func cells() -> [(Date, NSRect)] {
+        var out: [(Date, NSRect)] = []
+        for i in 0..<2 {
+            let first = monthStart(i)
+            let offset = (cal.component(.weekday, from: first) - cal.firstWeekday + 7) % 7
+            for d in 0..<cal.range(of: .day, in: .month, for: first)!.count {
+                let idx = offset + d
+                let rect = NSRect(x: originX(i) + CGFloat(idx % 7) * cw, y: headerH + weekH + CGFloat(idx / 7) * ch,
+                                  width: cw, height: ch)
+                out.append((cal.date(byAdding: .day, value: d, to: first)!, rect))
+            }
+        }
+        return out
+    }
+
+    private func day(at p: NSPoint) -> Date? { cells().first(where: { $0.1.contains(p) })?.0 }
+
+    /// The highlighted span: the chosen range, or start→hover while waiting for the second click.
+    private func span() -> (Date, Date)? {
+        guard let s = start else { return nil }
+        let e = awaitingEnd ? (hover ?? s) : (end ?? s)
+        return s <= e ? (s, e) : (e, s)
+    }
+
+    // ---- drawing
+
+    override func draw(_ dirtyRect: NSRect) {
+        let accent = NSColor.controlAccentColor
+        let center = NSMutableParagraphStyle(); center.alignment = .center
+        let symbols = cal.veryShortStandaloneWeekdaySymbols
+        let titleFmt = DateFormatter(); titleFmt.dateFormat = "MMMM yyyy"
+        for i in 0..<2 {
+            let x = originX(i)
+            (titleFmt.string(from: monthStart(i)) as NSString).draw(
+                in: NSRect(x: x, y: 8, width: cw * 7, height: 20),
+                withAttributes: [.font: NSFont.boldSystemFont(ofSize: 13), .foregroundColor: NSColor.labelColor,
+                                 .paragraphStyle: center])
+            for c in 0..<7 {
+                (symbols[(c + cal.firstWeekday - 1) % 7] as NSString).draw(
+                    in: NSRect(x: x + CGFloat(c) * cw, y: headerH, width: cw, height: weekH),
+                    withAttributes: [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.secondaryLabelColor,
+                                     .paragraphStyle: center])
+            }
+        }
+        let sel = span()
+        for (d, r) in cells() {
+            var textColor = d > today ? NSColor.tertiaryLabelColor : NSColor.labelColor
+            var font = NSFont.systemFont(ofSize: 13)
+            if let (lo, hi) = sel, d >= lo, d <= hi {
+                let alpha: CGFloat = awaitingEnd ? 0.15 : 0.25
+                var band = r.insetBy(dx: 0, dy: 2)
+                if lo != hi {
+                    if d == lo { band = NSRect(x: r.midX, y: band.minY, width: r.width / 2, height: band.height) }
+                    if d == hi { band = NSRect(x: r.minX, y: band.minY, width: r.width / 2, height: band.height) }
+                    accent.withAlphaComponent(alpha).setFill()
+                    band.fill()
+                }
+                if d == lo || d == hi {
+                    accent.setFill()
+                    NSBezierPath(ovalIn: NSRect(x: r.midX - 12, y: r.midY - 12, width: 24, height: 24)).fill()
+                    textColor = .white
+                    font = .boldSystemFont(ofSize: 13)
+                }
+            }
+            if cal.isDate(d, inSameDayAs: today) && textColor != .white {
+                textColor = accent
+                font = .boldSystemFont(ofSize: 13)
+            }
+            ("\(cal.component(.day, from: d))" as NSString).draw(
+                in: NSRect(x: r.minX, y: r.midY - 8, width: r.width, height: 18),
+                withAttributes: [.font: font, .foregroundColor: textColor, .paragraphStyle: center])
+        }
+        let hint: String
+        if start == nil {
+            hint = "Click the first day, then the last day."
+        } else if awaitingEnd {
+            hint = "Now click the last day."
+        } else if let (lo, hi) = sel {
+            let n = (cal.dateComponents([.day], from: lo, to: hi).day ?? 0) + 1
+            hint = "\(prettyDay(rangeKey(lo, hi))) · \(n) day\(n == 1 ? "" : "s")"
+        } else { hint = "" }
+        (hint as NSString).draw(in: NSRect(x: pad, y: bounds.height - footerH + 4, width: bounds.width - pad * 2, height: 18),
+                                withAttributes: [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.secondaryLabelColor,
+                                                 .paragraphStyle: center])
+    }
+
+    // ---- clicking
+
+    override func mouseDown(with event: NSEvent) {
+        if let d = day(at: convert(event.locationInWindow, from: nil)) { click(d) }
+    }
+
+    /// First click starts a new range, second click ends it (either order).
+    func click(_ date: Date) {
+        let d = cal.startOfDay(for: date)
+        guard d <= today else { return }
+        if start == nil || !awaitingEnd {
+            start = d; end = d; awaitingEnd = true
+        } else {
+            let s = start!
+            (start, end) = d < s ? (d, s) : (s, d)
+            awaitingEnd = false
+        }
+        needsDisplay = true
+        onChange?(start!, end!, !awaitingEnd)
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseMoved, .activeAlways, .mouseEnteredAndExited],
+                                       owner: self, userInfo: nil))
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        guard awaitingEnd else { return }
+        let d = day(at: convert(event.locationInWindow, from: nil))
+        if let d = d, d > today { return }
+        if d != hover { hover = d; needsDisplay = true }
+    }
+}
+
+func rangeKey(_ a: Date, _ b: Date) -> String {
+    let x = isoDay.string(from: min(a, b)), y = isoDay.string(from: max(a, b))
+    return x == y ? x : "\(x)_to_\(y)"
+}
+
 // MARK: - Report window ("Get report now")
 
 enum BannerStyle { case info, warning, error }
@@ -419,9 +603,12 @@ final class ReportWindowController: NSObject, NSWindowDelegate, WKNavigationDele
     unowned let app: AppDelegate
     let window: NSWindow
     let periodPopup = NSPopUpButton()
-    let datePicker = NSDatePicker()          // "Pick a date", or the start of a range
-    let toLabel = NSTextField(labelWithString: "to")
-    let toPicker = NSDatePicker()            // end of a range
+    let datePicker = NSDatePicker()          // "Pick a date"
+    let rangeButton = NSButton(title: "", target: nil, action: nil)   // "Date range": opens the calendar
+    let calendarPopover = NSPopover()
+    private(set) var calendarView: RangeCalendarView?
+    var rangeStart = Calendar.current.date(byAdding: .day, value: -7, to: Calendar.current.startOfDay(for: Date()))!
+    var rangeEnd = Calendar.current.startOfDay(for: Date())
     let generateButton = NSButton(title: "Generate", target: nil, action: nil)
     let statusLabel = NSTextField(labelWithString: "")
     let bannerBox = NSView()
@@ -460,7 +647,7 @@ final class ReportWindowController: NSObject, NSWindowDelegate, WKNavigationDele
     private func buildUI() {
         periodPopup.addItems(withTitles: ["Today so far", "Previous workday", "Pick a date", "Date range"])
         periodPopup.target = self
-        periodPopup.action = #selector(periodChanged)
+        periodPopup.action = #selector(popupChanged)
         datePicker.datePickerStyle = .textFieldAndStepper
         datePicker.datePickerElements = .yearMonthDay
         datePicker.dateValue = Date()
@@ -468,17 +655,18 @@ final class ReportWindowController: NSObject, NSWindowDelegate, WKNavigationDele
         datePicker.isHidden = true
         datePicker.target = self
         datePicker.action = #selector(periodChanged)
-        toPicker.datePickerStyle = .textFieldAndStepper
-        toPicker.datePickerElements = .yearMonthDay
-        toPicker.dateValue = Date()
-        toPicker.maxDate = Date()
-        toPicker.target = self
-        toPicker.action = #selector(periodChanged)
+        rangeButton.bezelStyle = .rounded
+        rangeButton.image = NSImage(systemSymbolName: "calendar", accessibilityDescription: "Choose dates")
+        rangeButton.imagePosition = .imageLeading
+        rangeButton.target = self
+        rangeButton.action = #selector(openCalendar)
+        calendarPopover.behavior = .transient
+        updateRangeTitle()
         generateButton.keyEquivalent = "\r"
         generateButton.bezelStyle = .rounded
 
         let periodLabel = NSTextField(labelWithString: "Report for:")
-        let top = NSStackView(views: [periodLabel, periodPopup, datePicker, toLabel, toPicker, NSView(), generateButton])
+        let top = NSStackView(views: [periodLabel, periodPopup, datePicker, rangeButton, NSView(), generateButton])
         top.orientation = .horizontal
         top.spacing = 8
 
@@ -607,9 +795,34 @@ final class ReportWindowController: NSObject, NSWindowDelegate, WKNavigationDele
 
     private func updatePickers() {
         let i = periodPopup.indexOfSelectedItem
-        datePicker.isHidden = i < 2
-        toLabel.isHidden = i != 3
-        toPicker.isHidden = i != 3
+        datePicker.isHidden = i != 2
+        rangeButton.isHidden = i != 3
+    }
+
+    func updateRangeTitle() {
+        rangeButton.title = " " + prettyDay(rangeKey(rangeStart, rangeEnd)).replacingOccurrences(of: ", \(Calendar.current.component(.year, from: Date()))", with: "")
+    }
+
+    @objc func popupChanged() {
+        periodChanged()
+        if periodPopup.indexOfSelectedItem == 3 { openCalendar() }
+    }
+
+    @objc func openCalendar() {
+        let cv = RangeCalendarView(start: rangeStart, end: rangeEnd)
+        cv.onChange = { [weak self] s, e, finished in
+            guard let self = self, finished else { return }
+            self.rangeStart = s
+            self.rangeEnd = e
+            self.updateRangeTitle()
+            self.periodChanged()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { self.calendarPopover.performClose(nil) }
+        }
+        calendarView = cv
+        let vc = NSViewController()
+        vc.view = cv
+        calendarPopover.contentViewController = vc
+        calendarPopover.show(relativeTo: rangeButton.bounds, of: rangeButton, preferredEdge: .maxY)
     }
 
     private func resolve(_ word: String) -> String? {
@@ -623,20 +836,13 @@ final class ReportWindowController: NSObject, NSWindowDelegate, WKNavigationDele
         case 0: return isoDay.string(from: Date())
         case 1: return resolve("prev")
         case 2: return isoDay.string(from: datePicker.dateValue)
-        default:   // a range; the two dates may be in either order
-            let a = isoDay.string(from: min(datePicker.dateValue, toPicker.dateValue))
-            let b = isoDay.string(from: max(datePicker.dateValue, toPicker.dateValue))
-            return a == b ? a : "\(a)_to_\(b)"
+        default: return rangeKey(rangeStart, rangeEnd)
         }
     }
 
     // ---- actions
 
     @objc func periodChanged() {
-        if periodPopup.indexOfSelectedItem == 3 && datePicker.dateValue >= toPicker.dateValue {
-            // Switching to a range: start it a week back so the two pickers aren't identical.
-            datePicker.dateValue = Calendar.current.date(byAdding: .day, value: -7, to: toPicker.dateValue) ?? datePicker.dateValue
-        }
         updatePickers()
         guard run == nil, let day = selectedDay() else { return }
         if let meta = app.paths.meta(day) {
@@ -804,7 +1010,7 @@ final class ReportWindowController: NSObject, NSWindowDelegate, WKNavigationDele
         generateButton.isEnabled = !busy
         periodPopup.isEnabled = !busy
         datePicker.isEnabled = !busy
-        toPicker.isEnabled = !busy
+        rangeButton.isEnabled = !busy
         copyButton.isEnabled = has
         openButton.isEnabled = has
         regenerateButton.isEnabled = !busy && (currentDay != nil)
@@ -831,7 +1037,7 @@ final class ReportWindowController: NSObject, NSWindowDelegate, WKNavigationDele
     /// Frames of the main controls in window coordinates (y grows upwards), to sanity-check the layout.
     func layout() -> [String: [Int]] {
         var out: [String: [Int]] = ["window": [0, 0, Int(window.contentView?.bounds.width ?? 0), Int(window.contentView?.bounds.height ?? 0)]]
-        let views: [String: NSView] = ["period": periodPopup, "datePicker": datePicker, "toPicker": toPicker, "generate": generateButton,
+        let views: [String: NSView] = ["period": periodPopup, "datePicker": datePicker, "rangeButton": rangeButton, "generate": generateButton,
             "status": statusLabel, "banner": bannerBox, "web": webView, "progress": progressStack, "placeholder": placeholder,
             "copy": copyButton, "open": openButton, "regenerate": regenerateButton, "close": closeButton]
         for (name, v) in views where !v.isHidden && v.superview != nil {
@@ -846,7 +1052,8 @@ final class ReportWindowController: NSObject, NSWindowDelegate, WKNavigationDele
             "windowVisible": window.isVisible,
             "period": periodPopup.titleOfSelectedItem ?? "",
             "datePickerVisible": !datePicker.isHidden,
-            "toPickerVisible": !toPicker.isHidden,
+            "rangeButton": rangeButton.isHidden ? "" : rangeButton.title,
+            "calendarOpen": calendarPopover.isShown,
             "menuIcon": app.statusItem.button?.image?.isTemplate == true ? "image" : (app.statusItem.button?.title ?? ""),
             "status": statusLabel.stringValue,
             "bannerVisible": !bannerBox.isHidden,
@@ -895,12 +1102,29 @@ final class Automation {
         case "period":
             w.periodPopup.selectItem(at: c["index"] as? Int ?? 0)
             if let d = c["date"] as? String, let date = isoDay.date(from: d) { w.datePicker.dateValue = date }
-            if let d = c["to"] as? String, let date = isoDay.date(from: d) { w.toPicker.dateValue = date }
+            if c["index"] as? Int == 3, let a = (c["date"] as? String).flatMap(isoDay.date(from:)),
+               let b = (c["to"] as? String).flatMap(isoDay.date(from:)) {
+                w.rangeStart = min(a, b); w.rangeEnd = max(a, b); w.updateRangeTitle()
+            }
             w.periodChanged()
         case "click":
             let buttons = ["generate": w.generateButton, "cancel": w.cancelButton, "copy": w.copyButton,
                            "open": w.openButton, "regenerate": w.regenerateButton, "close": w.closeButton]
             buttons[c["target"] as? String ?? ""]?.performClick(nil)
+        case "calendar":
+            w.periodPopup.selectItem(at: 3)
+            w.popupChanged()                                   // same as choosing "Date range"
+        case "calendarClick":
+            if let d = (c["day"] as? String).flatMap(isoDay.date(from:)) { w.calendarView?.click(d) }
+        case "calendarSnapshot":
+            if let v = w.calendarView, let rep = v.bitmapImageRepForCachingDisplay(in: v.bounds) {
+                let saved = v.appearance
+                v.appearance = NSAppearance(named: .aqua)      // snapshot has no popover background
+                v.cacheDisplay(in: v.bounds, to: rep)
+                v.appearance = saved
+                let dir = URL(fileURLWithPath: c["dir"] as? String ?? NSTemporaryDirectory())
+                try? rep.representation(using: .png, properties: [:])?.write(to: dir.appendingPathComponent("calendar.png"))
+            }
         case "snapshot":
             let dir = URL(fileURLWithPath: c["dir"] as? String ?? NSTemporaryDirectory())
             snapshot(w, to: dir)

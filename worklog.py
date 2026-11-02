@@ -559,21 +559,50 @@ def _session_evidence(s, max_prompts, prompt_len, ranged=False):
     return out
 
 
-def evidence_text(day, tesda, manual, budget=None, end=None):
-    """Plain-text evidence. Only TESDA projects and manual entries; Needs-review sessions are never included."""
+def days_in_period(tesda, manual, start, end, workdays):
+    """For a range: [(day, {project: sessions}, [manual entries])] for every day with evidence,
+    plus workdays with nothing (so 'no work captured' is visible). Weekends only if worked."""
+    out = []
+    d = start
+    while d <= end:
+        t = {p: [x for x in ss if x["day"] == d] for p, ss in tesda.items()}
+        t = {p: ss for p, ss in t.items() if ss}
+        m = [x for x in manual if x["_t"].date() == d]
+        if t or m or d.weekday() in workdays:
+            out.append((d, t, m))
+        d += timedelta(days=1)
+    return out
+
+
+def _projects_evidence(tesda, manual, max_prompts, prompt_len):
+    out = []
+    for project in _project_order(tesda, manual):
+        out.append(f"=== PROJECT: {project} ===")
+        mine = [m for m in manual if m["project"] == project]
+        if mine:
+            out.append("Logged by the user (true and done):")
+            out += [f"  - [{m['_t']:%H:%M}] {m['text']}" for m in mine]
+        for s in tesda.get(project, []):
+            out += _session_evidence(s, max_prompts, prompt_len)
+        out.append("")
+    return out
+
+
+def evidence_text(day, tesda, manual, budget=None, end=None, workdays=None):
+    """Plain-text evidence. Only TESDA projects and manual entries; Needs-review sessions are never included.
+    For a range, it's grouped by date first, then by project."""
     ranged = bool(end and end != day)
     budget = budget or (100000 if ranged else 60000)
     for max_prompts, prompt_len in ((15, 600), (8, 300), (4, 160), (2, 100)):
         out = [f"EVIDENCE FOR {pretty_period(day, end).upper()}", ""]
-        for project in _project_order(tesda, manual):
-            out.append(f"=== PROJECT: {project} ===")
-            mine = [m for m in manual if m["project"] == project]
-            if mine:
-                out.append("Logged by the user (true and done):")
-                out += [f"  - [{_when(m['_t'], ranged=ranged)}] {m['text']}" for m in mine]
-            for s in tesda.get(project, []):
-                out += _session_evidence(s, max_prompts, prompt_len, ranged)
-            out.append("")
+        if ranged:
+            for d, t, m in days_in_period(tesda, manual, day, end, workdays or {0, 1, 2, 3, 4}):
+                out.append(f"##### DATE: {pretty_day(d).upper()}")
+                if not t and not m:
+                    out += ["(no TESDA work captured)", ""]
+                out += _projects_evidence(t, m, max_prompts, prompt_len)
+        else:
+            out += _projects_evidence(tesda, manual, max_prompts, prompt_len)
         text = "\n".join(out)
         if len(text) <= budget:
             return text
@@ -584,7 +613,7 @@ AI_PROMPT = """You are writing {kind} for a software developer at TESDA \
 (the Philippines' Technical Education and Skills Development Authority). It will be pasted into \
 an official work log, so it must be accurate.
 
-The evidence for {period} is included in this message, grouped by project. There are two kinds:
+The evidence for {period} is included in this message, {grouping}. There are two kinds:
 1. "Logged by the user": entries the user typed by hand (meetings, QA, coordination, documentation…). \
 Treat them as true and completed unless the text says otherwise.
 2. "Claude Code session": what the user asked their AI coding assistant to do, the files that were \
@@ -592,18 +621,7 @@ changed, notable commands (✓ succeeded / ✗ failed), and the assistant's fina
 
 Write the report in Markdown, in English, in exactly this shape:
 
-{title}
-
-## <Project name>
-
-**Accomplishments**
-- <one line per accomplishment: past tense, specific, professional>
-
-**In progress / attempted**
-- <work that was started or requested, but the evidence doesn't show it was finished>
-
-Repeat for each project, in the order given. Leave out an empty sub-section. Leave out a project \
-with nothing worth reporting.
+{shape}
 
 Rules:
 1. Never invent work. Use only what the evidence shows. When unsure, leave it out or put it under \
@@ -620,10 +638,41 @@ paths, session IDs and tool names unless they matter. Merge duplicates. Skip chi
 questions, and setup problems that led nowhere.
 6. Output only the report: no preamble, no closing remarks, no code fences.{extra}"""
 
+DAY_SHAPE = """{title}
+
+## <Project name>
+
+**Accomplishments**
+- <one line per accomplishment: past tense, specific, professional>
+
+**In progress / attempted**
+- <work that was started or requested, but the evidence doesn't show it was finished>
+
+Repeat for each project, in the order given. Leave out an empty sub-section. Leave out a project \
+with nothing worth reporting."""
+
+RANGE_SHAPE = """{title}
+
+## <Weekday, Month D, YYYY>
+
+### <Project name>
+
+**Accomplishments**
+- <one line per accomplishment: past tense, specific, professional>
+
+**In progress / attempted**
+- <work that was started or requested, but the evidence doesn't show it was finished>
+
+Write one "##" section per DATE in the evidence, in date order, with the date written exactly as \
+in the evidence (e.g. "## Monday, October 26, 2026"). Inside each date, one "###" sub-section per \
+project that had work that day, in the order given. Leave out an empty sub-section. For a date \
+marked "(no TESDA work captured)", write the date heading and then the line \
+"_No TESDA work captured._" on its own."""
+
 RANGE_RULE = """
-7. This report covers several days. Merge related work across days into one bullet per piece \
-of work, grouped by project; don't list day by day. Add a date in parentheses only when it \
-matters (for example a release or a meeting)."""
+7. Report day by day. Keep each piece of work under the date it was done; never merge work from \
+different days into one bullet or move it to another date. If a task continued over several \
+days, say what was done on each of those days."""
 
 
 def report_title(start, end=None):
@@ -634,9 +683,12 @@ def report_title(start, end=None):
 
 def build_prompt(start, end=None):
     ranged = bool(end and end != start)
-    return AI_PROMPT.format(kind="an accomplishment report covering several days" if ranged
+    title = report_title(start, end)
+    return AI_PROMPT.format(kind="a day-by-day accomplishment report covering several days" if ranged
                             else "a daily accomplishment report",
-                            period=pretty_period(start, end), title=report_title(start, end),
+                            period=pretty_period(start, end),
+                            grouping="grouped by date and then by project" if ranged else "grouped by project",
+                            shape=(RANGE_SHAPE if ranged else DAY_SHAPE).format(title=title),
                             extra=RANGE_RULE if ranged else "")
 
 
@@ -704,26 +756,20 @@ def clean_ai_output(text, title):
 
 # ---------------------------------------------------------------- report text
 
-def raw_body(day, tesda, manual, warning=None, end=None):
-    ranged = bool(end and end != day)
-    out = [report_title(day, end), ""]
-    if warning:
-        out += [f"> ⚠️ **The AI summary couldn't be written:** {warning}", ">",
-                "> Below is the raw evidence instead. Fix the problem and regenerate, or write the bullets yourself.", ""]
-    else:
-        out += ["> Raw evidence (no AI summary). Turn it into accomplishment bullets before you submit it.", ""]
+def _raw_projects(tesda, manual, level="##"):
+    out = []
     for project in _project_order(tesda, manual):
-        out += [f"## {project}", ""]
+        out += [f"{level} {project}", ""]
         mine = [m for m in manual if m["project"] == project]
         if mine:
-            out += ["**Logged by you**"] + [f"- {_when(m['_t'], ranged=ranged)} — {m['text']}" for m in mine] + [""]
+            out += ["**Logged by you**"] + [f"- {m['_t']:%H:%M} — {m['text']}" for m in mine] + [""]
         ss = tesda.get(project, [])
         if ss:
             out.append("**Claude Code sessions**")
             for s in ss:
                 head = s["title"] or (clip(s["prompts"][0], 90) if s["prompts"] else "Session")
                 branch = f" · branch `{s['branch']}`" if s["branch"] else ""
-                out.append(f"- **{head}** · {_when(s['start'], s['end'], ranged)}{branch}")
+                out.append(f"- **{head}** · {s['start']:%H:%M}–{s['end']:%H:%M}{branch}")
                 if s["prompts"]:
                     more = f" (+{len(s['prompts']) - 1} more requests)" if len(s["prompts"]) > 1 else ""
                     out.append(f"  - Asked: “{clip(s['prompts'][0], 200)}”{more}")
@@ -739,6 +785,23 @@ def raw_body(day, tesda, manual, warning=None, end=None):
                 if s["last_reply"]:
                     out.append(f"  - Claude's last message: “{clip(s['last_reply'], 300)}”")
             out.append("")
+    return out
+
+
+def raw_body(day, tesda, manual, warning=None, end=None, workdays=None):
+    ranged = bool(end and end != day)
+    out = [report_title(day, end), ""]
+    if warning:
+        out += [f"> ⚠️ **The AI summary couldn't be written:** {warning}", ">",
+                "> Below is the raw evidence instead. Fix the problem and regenerate, or write the bullets yourself.", ""]
+    else:
+        out += ["> Raw evidence (no AI summary). Turn it into accomplishment bullets before you submit it.", ""]
+    if ranged:
+        for d, t, m in days_in_period(tesda, manual, day, end, workdays or {0, 1, 2, 3, 4}):
+            out += [f"## {pretty_day(d)}", ""]
+            out += _raw_projects(t, m, "###") if (t or m) else ["_No TESDA work captured._", ""]
+    else:
+        out += _raw_projects(tesda, manual)
     return "\n".join(out).rstrip() + "\n"
 
 
@@ -905,7 +968,8 @@ body {{ margin:0; background:var(--bg); color:var(--fg);
 main {{ max-width: 760px; margin: 0 auto; padding: 28px 28px 48px; }}
 h1 {{ font-size: 22px; line-height:1.3; margin: 0 0 18px; padding-bottom: 12px; border-bottom: 3px solid var(--accent); }}
 h2 {{ font-size: 17px; margin: 28px 0 8px; color: var(--accent); }}
-h3 {{ font-size: 15px; margin: 20px 0 6px; }}
+h3 {{ font-size: 15px; margin: 16px 0 6px; color: var(--accent); }}
+h2 + h3 {{ margin-top: 8px; }}
 p {{ margin: 8px 0; }}
 p strong:only-child {{ display:block; margin-top: 14px; font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }}
 ul, ol {{ margin: 6px 0 12px; padding-left: 22px; }}
@@ -989,15 +1053,15 @@ def build_report(day, cfg, use_ai=True, projects_dir=None, end=None):
                     "Code sessions in your TESDA folders and nothing logged by hand._\n")
         elif use_ai:
             try:
-                evidence = evidence_text(day, tesda, manual, end=end)
+                evidence = evidence_text(day, tesda, manual, end=end, workdays=cfg["_workdays"])
                 body = clean_ai_output(ask_claude(evidence, build_prompt(day, end), cfg), title)
                 ai_status = "ok"
             except WorklogError as ex:
                 ai_status, error = "failed", str(ex)
-                body = raw_body(day, tesda, manual, warning=error, end=end)
+                body = raw_body(day, tesda, manual, warning=error, end=end, workdays=cfg["_workdays"])
         else:
             ai_status = "off"
-            body = raw_body(day, tesda, manual, end=end)
+            body = raw_body(day, tesda, manual, end=end, workdays=cfg["_workdays"])
 
         now = datetime.now()
         md = body.rstrip() + "\n\n" + APPENDIX_MARK + "\n" + appendix(review, tesda, now, ai_status, cfg, ranged)

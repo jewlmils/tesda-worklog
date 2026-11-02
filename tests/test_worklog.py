@@ -318,21 +318,38 @@ class Ranges(unittest.TestCase):
         self.assertTrue(meta["md"].endswith("2026-10-29_to_2026-10-30.md"))
         md = Path(meta["md"]).read_text()
         self.assertTrue(md.startswith("# Accomplishment Report — October 29 – 30, 2026"))
-        self.assertIn("Thu Oct 29 23:30–23:40", md)
-        self.assertIn("Attended the TRACK UAT kickoff", md)
+        body = md.split(worklog.APPENDIX_MARK)[0]
+        thu, fri = body.index("## Thursday, October 29, 2026"), body.index("## Friday, October 30, 2026")
+        self.assertLess(thu, fri)                                    # by date, in order
+        self.assertIn("### TESDA-TRACK", body[thu:fri])              # projects inside each date
+        self.assertIn("Attended the TRACK UAT kickoff", body[thu:fri])
+        self.assertIn("23:30–23:40", body[thu:fri])                  # Thursday's half of the midnight session
+        self.assertIn("Reviewed TSP release notes", body[fri:])
+        self.assertIn("00:20–00:30", body[fri:])                     # ...and Friday's half
+        self.assertNotIn("Reviewed TSP release notes", body[thu:fri])
         self.assertEqual(worklog.read_meta(THU, cfg(), FRI)["day"], "2026-10-29_to_2026-10-30")
 
     def test_range_prompt_and_evidence(self):
         os.environ["FAKE_CLAUDE_LOG"] = str(TMP / "fake-range.json")
         worklog.build_report(THU, cfg(claude_path=fake_claude(FAKE_OK)), use_ai=True, end=FRI)
         call = json.loads((TMP / "fake-range.json").read_text())
-        self.assertIn("Merge related work across days", call["argv"][1])
+        self.assertIn("Report day by day", call["argv"][1])
+        self.assertIn("## <Weekday, Month D, YYYY>", call["argv"][1])
         self.assertIn("# Accomplishment Report — October 29 – 30, 2026", call["argv"][1])
         self.assertIn("EVIDENCE FOR OCTOBER 29 – 30, 2026", call["stdin"])
-        self.assertIn("[Thu Oct 29", call["stdin"])
+        ev = call["stdin"]
+        self.assertLess(ev.index("##### DATE: THURSDAY, OCTOBER 29, 2026"), ev.index("##### DATE: FRIDAY, OCTOBER 30, 2026"))
+
+    def test_empty_workdays_shown_weekends_skipped(self):
+        meta = worklog.build_report(FRI, cfg(), use_ai=False, end=MON)
+        body = Path(meta["md"]).read_text().split(worklog.APPENDIX_MARK)[0]
+        self.assertNotIn("Saturday", body)
+        self.assertNotIn("Sunday", body)
+        mon = body.index("## Monday, November 2, 2026")
+        self.assertIn("_No TESDA work captured._", body[mon:])
 
     def test_daily_prompt_has_no_range_rule(self):
-        self.assertNotIn("across days", worklog.build_prompt(FRI))
+        self.assertNotIn("day by day", worklog.build_prompt(FRI))
         self.assertIn("# Daily Accomplishment Report — Friday, October 30, 2026", worklog.build_prompt(FRI))
 
     def test_cli_range(self):

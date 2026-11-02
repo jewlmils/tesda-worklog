@@ -8,7 +8,7 @@ A small macOS menu bar utility. Every weekday morning it gives you a report of w
 - **Manual notes:** a *Log something…* dialog for meetings, QA, coordination and documentation.
 - **TESDA only:** only folders you list count. Anything unknown goes under *Needs review* and is never added on its own.
 - **Honest summary:** your own `claude` CLI (Claude Pro, no API key) turns the evidence into concise bullets. It never invents work, and anything unfinished goes under *In progress / attempted*.
-- **On demand:** **Get report now…** (⌘R) for today so far, the previous workday, any date, or a **date range** (e.g. Oct 26 – Nov 10), summarised as one report.
+- **On demand:** **Get report now…** (⌘R) for today so far, the previous workday, any date, or a **date range** (e.g. Oct 26 – Nov 10) picked on a mini calendar and written day by day.
 - **Keeps TESDA history for the half-year:** TESDA transcripts are archived until Jun 30 / Dec 31, with an alert beforehand. Other projects keep Claude Code's normal 30 days.
 
 Python 3 (standard library only) + one Swift file + launchd. No database, server, Node, or API key.
@@ -93,7 +93,7 @@ Then edit:
 
 | Item | What it does |
 |---|---|
-| **Get report now… ⌘R** | Opens the report window. Pick **Today so far**, **Previous workday**, **Pick a date**, or **Date range** (From … to …), then **Generate**. A spinner shows while Claude writes (up to a minute), and **Cancel** stops it. If a report for that day already exists, it's shown right away with its *Generated at* time. Claude isn't called again unless you click **Regenerate**. |
+| **Get report now… ⌘R** | Opens the report window. Pick **Today so far**, **Previous workday**, **Pick a date**, or **Date range**, then **Generate**. Choosing **Date range** opens a mini calendar (two months, ◀ ▶ to move): click the first day, then the last day, and the days between are highlighted. Click the 📅 button to change the range later. A range report is written **day by day**: one section per date, projects inside each date. Workdays with nothing captured say so, and weekends appear only if you worked. A spinner shows while Claude writes (up to a minute), and **Cancel** stops it. If a report for that day already exists, it's shown right away with its *Generated at* time. Claude isn't called again unless you click **Regenerate**. |
 | **Log something… ⌘L** | One line of text + a project. It's added to that day's report and treated as true. |
 | Open reports folder | Opens the reports folder in Finder. |
 | Export TESDA history… | Zips the archived TESDA transcripts into the reports folder and shows the file in Finder. |
@@ -180,7 +180,7 @@ To run it right now: `launchctl kickstart -k gui/$(id -u)/ph.tesda.worklog.repor
 ## Development
 
 ```bash
-python3 -m unittest discover -s tests -v       # 45 tests on synthetic transcripts (tests/fixtures)
+python3 -m unittest discover -s tests -v       # 46 tests on synthetic transcripts (tests/fixtures)
 python3 tests/make_fixtures.py                 # regenerate the fixtures after editing them
 swiftc -O menubar.swift -o build/TESDAWorklog  # compile check
 swift assets/make_icon.swift                   # redraw the icons (AppIcon.icns, menu bar MenuIcon*.png)

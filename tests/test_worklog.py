@@ -376,6 +376,100 @@ class Ranges(unittest.TestCase):
         self.assertTrue((TMP / "reports" / "2026-10-29_to_2026-10-30.html").exists())
 
 
+def git(repo, *args, when=None, author="Me <me@example.com>"):
+    import subprocess
+    name, email = author[:-1].split(" <")
+    env = dict(os.environ, GIT_AUTHOR_NAME=name, GIT_AUTHOR_EMAIL=email, GIT_COMMITTER_NAME=name,
+               GIT_COMMITTER_EMAIL=email, GIT_CONFIG_GLOBAL="/dev/null")
+    if when:
+        env.update(GIT_AUTHOR_DATE=when, GIT_COMMITTER_DATE=when)
+    subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, env=env)
+
+
+def commit(repo, path, subject, when, author="Me <me@example.com>"):
+    f = Path(repo) / path
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(f.read_text() + "x\n" if f.exists() else "x\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", subject, when=when, author=author)
+
+
+class GitCommits(unittest.TestCase):
+    """A real temporary repo: dates are UTC, the tests run in Manila time (UTC+8)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.repo = TMP / "gitrepo"
+        cls.repo.mkdir()
+        git(cls.repo, "init", "-q", "-b", "main")
+        git(cls.repo, "config", "user.email", "me@example.com")
+        commit(cls.repo, "app/a.txt", "[FEAT] Thursday work", "2026-10-29T03:00:00Z")
+        commit(cls.repo, "app/b.txt", "[FEAT] Add login screen", "2026-10-29T17:30:00Z")   # Fri 01:30 Manila
+        commit(cls.repo, "app/c.txt", "Colleague's change", "2026-10-30T02:00:00Z", author="Ana <ana@example.com>")
+        commit(cls.repo, "docs/d.txt", "Docs only", "2026-10-30T03:00:00Z")
+        git(cls.repo, "checkout", "-q", "-b", "feat/sheet")
+        commit(cls.repo, "app/e.txt", "[FIX] Fallback sheet", "2026-10-30T05:00:00Z")
+        commit(cls.repo, "app/old.txt", "Old work", "2026-09-01T05:00:00Z")
+        (cls.repo / "app" / "a.txt").write_text("stashed change\n")
+        git(cls.repo, "stash", "-q", when="2026-10-30T06:00:00Z")                           # stashes don't count
+
+    def setUp(self):
+        if worklog.MANUAL_LOG.exists():
+            worklog.MANUAL_LOG.unlink()
+
+    def cfg(self, folder=None, **kw):
+        return cfg(projects={TSP: [str(folder or self.repo)]}, **kw)
+
+    def subjects(self, day, c, end=None):
+        commits, _ = worklog.read_commits(day, c, end)
+        return [x["subject"] for x in commits.get(TSP, [])]
+
+    def test_your_commits_by_local_day(self):
+        self.assertEqual(self.subjects(FRI, self.cfg()), ["[FEAT] Add login screen", "Docs only", "[FIX] Fallback sheet"])
+        self.assertEqual(self.subjects(THU, self.cfg()), ["[FEAT] Thursday work"])
+
+    def test_branch_and_stats(self):
+        c = [x for x in worklog.read_commits(FRI, self.cfg())[0][TSP] if x["subject"] == "[FIX] Fallback sheet"][0]
+        self.assertEqual((c["branch"], c["files"], c["ins"], c["repo"]), ("feat/sheet", 1, 1, "gitrepo"))
+
+    def test_extra_author_and_subfolder(self):
+        self.assertIn("Colleague's change", self.subjects(FRI, self.cfg(git_authors=["ana@example.com"])))
+        self.assertEqual(self.subjects(FRI, self.cfg(folder=self.repo / "app")),       # only commits touching app/
+                         ["[FEAT] Add login screen", "[FIX] Fallback sheet"])
+
+    def test_parent_folder_with_repos_and_missing_folder(self):
+        self.assertEqual(len(self.subjects(FRI, self.cfg(folder=TMP))), 3)               # finds gitrepo inside TMP
+        commits, warnings = worklog.read_commits(FRI, self.cfg(folder="/Volumes/NotPlugged/x"))
+        self.assertEqual(commits, {})
+        self.assertIn("is the drive plugged in", warnings[0])
+
+    def test_turned_off(self):
+        self.assertEqual(worklog.read_commits(FRI, self.cfg(git_tracking=False)), ({}, []))
+
+    def test_commits_alone_make_a_report(self):
+        meta = worklog.build_report(date(2026, 9, 1), self.cfg(), use_ai=False)
+        self.assertEqual((meta["ai"], meta["commits"]), ("off", 1))
+        md = Path(meta["md"]).read_text()
+        self.assertIn("**Git commits**", md)
+        self.assertIn("Old work (branch feat/sheet, repo gitrepo, 1 file, +1/−0)", md)
+
+    def test_evidence_and_range_by_day(self):
+        os.environ["FAKE_CLAUDE_LOG"] = str(TMP / "fake-git.json")
+        worklog.build_report(THU, self.cfg(claude_path=fake_claude(FAKE_OK)), use_ai=True, end=FRI)
+        call = json.loads((TMP / "fake-git.json").read_text())
+        ev = call["stdin"]
+        self.assertIn("Git commits by the user (finished work):", ev)
+        thu, fri = ev.index("##### DATE: THURSDAY"), ev.index("##### DATE: FRIDAY")
+        self.assertIn("Thursday work", ev[thu:fri])
+        self.assertIn("Fallback sheet", ev[fri:])
+        self.assertNotIn("Colleague", ev)
+        self.assertIn("A commit is evidence that the work", call["argv"][1])
+
+    def test_summary_mentions_commits(self):
+        meta = worklog.build_report(FRI, self.cfg(), use_ai=False)
+        self.assertIn(", 3 commits ·", worklog.summary_line(meta))
+
+
 class Scheduled(unittest.TestCase):
     def setUp(self):
         for p in (worklog.STATE_PATH, worklog.INBOX / "show.json"):

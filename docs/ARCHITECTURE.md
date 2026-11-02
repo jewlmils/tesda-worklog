@@ -14,6 +14,7 @@ flowchart LR
     T -- "TESDA folders only<br/>(copied daily)" --> AR["archive/<br/>kept until Jun 30 / Dec 31"]
     AR --> R
     M["manual_log.jsonl<br/>Log something… / worklog log"] --> E
+    G["git log in project repos<br/>your commits, any branch<br/>(read-only)"] --> E
     R --> F{classify by folder<br/>config.json}
     F -- project --> E[evidence_text<br/>prompts, files changed,<br/>shell edits, commits/tests ✓✗,<br/>Claude's last message]
     F -- exclude --> X[dropped]
@@ -52,7 +53,7 @@ flowchart TB
 | `install.sh` | Builds `~/Applications/TESDA Worklog.app` (Info.plist + `swiftc` binary + icons, ad-hoc signed). Copies `worklog.py` to `~/Library/Application Support/TESDA-Worklog`, creates or updates the config, installs the `worklog` command and the Documents link, and writes and loads both LaunchAgents. `--dock` pins the app. Safe to run again. |
 | `uninstall.sh` | Removes the app, its Dock pin, the jobs and the command. Keeps data unless you pass `--all`. |
 | `tests/make_fixtures.py` | Writes synthetic transcripts that mimic the real JSONL format, including the noisy parts. |
-| `tests/test_worklog.py` | 49 stdlib `unittest` tests. Claude is replaced by a fake executable that records its arguments. |
+| `tests/test_worklog.py` | 57 stdlib `unittest` tests (including a real temporary git repo). Claude is replaced by a fake executable that records its arguments. |
 | `reference/` | The earlier prototype, kept for comparison. |
 
 Data files (all in the app folder): `config.json`, `manual_log.jsonl` (one JSON object per entry), `state.json` (last morning delivery, last archive purge, alerts already shown), `running.json` (the PID of a report being written), `inbox/` (requests to the menu bar app), `archive/` (copies of TESDA transcripts), `logs/`, `reports/`.
@@ -92,6 +93,8 @@ Claude Code writes one JSONL file per session. Only lines with `type` set to `us
 **Date ranges: one pass, one Claude call, written day by day.** `read_sessions(start, end=…)` reads the transcripts once and returns a record per (session, local day). The evidence is grouped by date, then by project, and includes workdays with nothing captured. The prompt asks for one `##` section per date with `###` projects inside, and forbids moving or merging work across days. The no-AI fallback uses the same layout. The evidence budget grows to about 100k characters and trims prompts harder if needed. Range reports are saved as `START_to_END.*`. In the window, `RangeCalendarView` is a small custom-drawn two-month calendar in a popover, so a range can be picked with two clicks across months.
 
 **Manual entries aren't limited to config projects.** Folders decide which *Claude sessions* count as TESDA. But anything you log by hand is TESDA work by definition, so its project can be any name: a config project, the built-in *General TESDA work*, or a name you type. `match_project` reuses an existing name regardless of case, expands a unique partial match of a config project ("track" → "TESDA-TRACK"), and otherwise keeps your new name. The dialog's list comes from config plus the names in `manual_log.jsonl`, so nothing else needs storing.
+
+**Git commits: author date, all branches, no `--since`.** `read_commits` runs `git log --branches --remotes --no-merges -F --author=… --source --shortstat` for each repo found in or under a project folder. It's limited to the folder's path when the project is a sub-folder of a repo. Dates are filtered in Python by **author date in local time**, for two reasons. First, git's `--since` uses the committer date, and it *stops walking a branch* at the first older commit, which loses real work after rebases or amends. Second, filtering by author is cheap (0.4 s for a 1,800-commit repo). Stashes are excluded by not using `--all`. Authors are the repo's `user.email` plus `git_authors`, matched as fixed strings. Commits are threaded through the same evidence, raw and day-by-day paths as sessions and manual entries, and the prompt treats a commit as proof of completion.
 
 **TESDA history: copy, don't configure.** You asked for TESDA transcripts to be kept until Jun 30 / Dec 31, and other projects to keep Claude Code's 30 days. Claude Code's `cleanupPeriodDays` is global and rolling, so it can't do that. Instead, the daily job copies transcripts from TESDA folders into the app's own `archive/`. After alerts 7 days before and on the day, it deletes them the morning after each purge date. Claude Code's settings and `~/.claude/projects` are never modified. A purged half-year isn't re-archived from transcripts that Claude Code hasn't cleaned up yet: `state.json` records the cutoff.
 

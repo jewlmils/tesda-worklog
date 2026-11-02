@@ -5,6 +5,7 @@
 A small macOS menu bar and Dock app. Every weekday morning it gives you a report of what you did for **TESDA** on the previous workday, ready to paste into your accomplishment form.
 
 - **Automatic:** it reads the session history that Claude Code (Claude CLI) already saves. Nothing extra runs while you work.
+- **Git commits:** commits *you* made in your TESDA repos count as proof of finished work, even without Claude.
 - **Manual notes:** a *Log something…* dialog for meetings, QA, coordination and documentation, for TSP, TRACK, *General TESDA work*, or any project name you type.
 - **TESDA only:** only folders you list count. Anything unknown goes under *Needs review* and is never added on its own.
 - **Honest summary:** your own `claude` CLI (Claude Pro, no API key) turns the evidence into concise bullets. It never invents work, and anything unfinished goes under *In progress / attempted*.
@@ -77,6 +78,9 @@ Then edit:
 | `model` | Passed to `claude --model`. `sonnet` is fast and good at this. |
 | `claude_path` | Full path to `claude`, if it can't be found automatically. |
 | `open_report` | `false` = notification only; the report window doesn't open in the morning. |
+| `git_tracking` | `true` (default): also read commits you made in the git repos inside your project folders (read-only, any branch, not stashes). |
+| `git_authors` | Extra author emails that are you, e.g. a work address (`["you@tesda.gov.ph"]`). Your repo's `git user.email` is always included. |
+| `git_repos` | Repos that aren't inside a project folder, per project: `{"TESDA-TRACK": ["~/dev/track-api"]}`. |
 | `archive_purge_dates` / `archive_warn_days` | When the TESDA history archive is emptied (default `["06-30", "12-31"]`) and how many days ahead you're warned (default 7). |
 | `reports_dir` | Leave empty (see *Where files live*). |
 
@@ -118,10 +122,22 @@ worklog log "Monthly staff meeting" --project="General TESDA work"
 worklog log "Set up the training room projector" --project="Regional Office Support"   # new names are fine
 worklog log "Reviewed UAT checklist" --project=TSP --date=2026-10-30
 worklog sessions [DAY]                  # what was captured and how each session was classified
+worklog commits [DAY or A..B]           # your git commits in the project repos
 worklog folders                         # every folder you've used Claude Code in
 worklog archive [export]                # TESDA history archive: status, or zip a copy
 worklog paths                           # where everything lives
 ```
+
+## Git commits
+
+Commits are the strongest evidence that something is *done*, and they cover work you did without Claude. For every project folder, TESDA Worklog finds its git repo(s):
+- a folder that is a repo, or is inside one (a sub-folder only counts commits touching it)
+- a parent folder: the repos inside it
+- anything in `git_repos`
+
+It then reads the commits **you** authored on the report day(s), by author date in local time. It reads all local and remote branches, skipping merges and stashes. Matching uses your repo's `user.email` plus `git_authors`.
+
+They're listed as evidence, and Claude turns them into plain-language accomplishments. A commit can also show that something a Claude session left unfinished was completed later. Everything is read-only (`git log` / `git config`). A repo on an unplugged drive is skipped, with a note at the bottom of the report. Check what's found with `worklog commits 2026-11-02`.
 
 ## TESDA history (6-month archive)
 
@@ -184,7 +200,7 @@ To run it right now: `launchctl kickstart -k gui/$(id -u)/ph.tesda.worklog.repor
 ## Development
 
 ```bash
-python3 -m unittest discover -s tests -v       # 49 tests on synthetic transcripts (tests/fixtures)
+python3 -m unittest discover -s tests -v       # 57 tests on synthetic transcripts (tests/fixtures)
 python3 tests/make_fixtures.py                 # regenerate the fixtures after editing them
 swiftc -O menubar.swift -o build/TESDAWorklog  # compile check (install.sh builds the real app)
 swift assets/make_icon.swift                   # redraw the icons (AppIcon.icns, menu bar MenuIcon*.png)

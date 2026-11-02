@@ -1052,7 +1052,9 @@ final class ReportWindowController: NSObject, NSWindowDelegate, WKNavigationDele
         if !keepBanner { hideBanner() }
         var status = "\(prettyDay(day)) · \(generatedNote(meta))"
         if let s = meta["sessions"] as? Int, let m = meta["manual"] as? Int, let k = meta["review"] as? Int {
-            status += " · \(s) session\(s == 1 ? "" : "s"), \(m) logged · \(k) to review"
+            let c = meta["commits"] as? Int ?? 0
+            status += " · \(s) session\(s == 1 ? "" : "s"), \(m) logged"
+                + (c > 0 ? ", \(c) commit\(c == 1 ? "" : "s")" : "") + " · \(k) to review"
         }
         statusLabel.stringValue = status
         if !keepBanner {

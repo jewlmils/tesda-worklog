@@ -65,6 +65,9 @@ DEFAULT_CONFIG = {
         "report_time: when the morning report runs (24h). Re-run install.sh after changing it.",
         "archive_purge_dates: TESDA transcripts are copied to the app's archive (so they outlive Claude Code's "
         "30-day cleanup) and deleted the morning after these dates (MM-DD). You're alerted archive_warn_days before.",
+        "git_tracking: also read commits YOU made in the git repos inside your project folders (read-only). "
+        "git_authors: extra author emails to count as you (your git user.email is always included). "
+        "git_repos: extra repos per project that aren't inside its folders, e.g. {\"TESDA-TRACK\": [\"~/dev/track-api\"]}.",
         "reports_dir: leave empty. Reports are then kept in the app folder, and ~/Documents/TESDA-Worklog/reports "
         "links to them (macOS blocks background jobs from rewriting files in Documents).",
     ],
@@ -80,6 +83,9 @@ DEFAULT_CONFIG = {
     "claude_path": "",
     "claude_timeout_seconds": 300,
     "open_report": True,
+    "git_tracking": True,
+    "git_authors": [],
+    "git_repos": {},
     "archive_purge_dates": ["06-30", "12-31"],
     "archive_warn_days": 7,
 }
@@ -551,10 +557,123 @@ def group(sessions, cfg):
     return {k: v for k, v in tesda.items() if v}, review, excluded
 
 
+# ---------------------------------------------------------------- git commits (read-only)
+#
+# Commits are the strongest evidence that something was finished, and they also catch work done
+# without Claude. For each project folder we find its git repo(s) and read the commits YOU authored
+# on the report day(s), on any local or remote branch (not stashes), merges excluded.
+
+def _git(where, *args, timeout=15):
+    try:
+        r = subprocess.run(["git", "-C", str(where), *args], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return r.stdout if r.returncode == 0 else None
+
+
+def project_repos(cfg):
+    """{project: [(repo top, path inside the repo or None)]}, plus folders that couldn't be read.
+
+    A project folder that is a repo, or sits inside one, uses that repo (limited to the folder when
+    it's a sub-folder). A folder that holds several repos (e.g. ~/dev/tesda) uses each of them.
+    """
+    repos, unavailable = {}, []
+    extra = cfg.get("git_repos") or {}
+    for name, folders in list(cfg["projects"].items()) + [(k, []) for k in extra if k not in cfg["projects"]]:
+        found = []
+        for f in list(folders) + list(extra.get(name) or []):
+            p = Path(os.path.expanduser(f))
+            if not p.is_dir():
+                unavailable.append(str(p))
+                continue
+            top = _git(p, "rev-parse", "--show-toplevel")
+            if top:
+                top = top.strip()
+                rel = os.path.relpath(str(p.resolve()), str(Path(top).resolve()))
+                found.append((top, None if rel == "." else rel))
+            else:
+                for marker in sorted(p.glob("*/.git")) + sorted(p.glob("*/*/.git")):
+                    found.append((str(marker.parent), None))
+        if found:
+            repos[name] = list(dict.fromkeys(found))
+    return repos, unavailable
+
+
+def _authors(cfg, repo):
+    out = [a.strip() for a in cfg.get("git_authors") or [] if str(a).strip()]
+    me = (_git(repo, "config", "user.email") or "").strip()
+    if me and me not in out:
+        out.append(me)
+    return out
+
+
+def _parse_shortstat(text):
+    nums = {k: 0 for k in ("files", "ins", "dels")}
+    for n, word in re.findall(r"(\d+) (file|insertion|deletion)", text):
+        nums[{"file": "files", "insertion": "ins", "deletion": "dels"}[word]] = int(n)
+    return nums
+
+
+def read_commits(day, cfg, end=None):
+    """Your commits on `day` (or day..end), by LOCAL author date: ({project: [commit]}, [warnings])."""
+    end = end or day
+    if not cfg.get("git_tracking", True):
+        return {}, []
+    repos, unavailable = project_repos(cfg)
+    warnings = [f"Couldn't read `{u}` (folder not found; is the drive plugged in?)" for u in unavailable]
+    out = {}
+    for project, entries in repos.items():
+        seen = set()
+        for top, sub in entries:
+            authors = _authors(cfg, top)
+            if not authors:
+                warnings.append(f"`{top}`: no git user.email set, so your commits can't be recognised.")
+                continue
+            # No --since/--until: git stops walking a branch at the first older commit (rebases and amends
+            # break date order), which would hide real work. Filtering by author is cheap; dates are
+            # filtered below, by AUTHOR date in local time. --shortstat is only computed for your commits.
+            args = ["log", "--branches", "--remotes", "--no-merges", "-F", "--source",
+                    "--format=%x1e%H%x1f%aI%x1f%ae%x1f%S%x1f%s", "--shortstat"]
+            args += [f"--author={a}" for a in authors]
+            if sub:
+                args += ["--", sub]
+            raw = _git(top, *args, timeout=30)
+            if raw is None:
+                warnings.append(f"`{top}`: git log failed.")
+                continue
+            for rec in raw.split("\x1e"):
+                if not rec.strip():
+                    continue
+                head, _, rest = rec.partition("\n")
+                parts = head.split("\x1f")
+                if len(parts) < 5 or parts[0] in seen:
+                    continue
+                t = local_time(parts[1])          # handles both "+08:00" and "Z"
+                if t is None or not (day <= t.date() <= end):
+                    continue
+                seen.add(parts[0])
+                branch = re.sub(r"^refs/(heads|remotes)/", "", parts[3])
+                out.setdefault(project, []).append({
+                    "project": project, "repo": Path(top).name, "hash": parts[0][:9], "t": t, "day": t.date(),
+                    "author": parts[2], "branch": branch, "subject": "\x1f".join(parts[4:]).strip(),
+                    **_parse_shortstat(rest),
+                })
+        if project in out:
+            out[project].sort(key=lambda c: c["t"])
+    return out, warnings
+
+
+def _commit_line(c):
+    stat = f"{c['files']} file{'s' if c['files'] != 1 else ''}, +{c['ins']}/−{c['dels']}" if c["files"] else ""
+    where = ", ".join(x for x in (f"branch {c['branch']}" if c["branch"] else "", f"repo {c['repo']}", stat) if x)
+    return f"{c['subject']} ({where})"
+
+
 # ---------------------------------------------------------------- evidence for the AI
 
-def _project_order(tesda, manual):
-    return list(dict.fromkeys(list(tesda) + [m["project"] for m in manual]))
+def _project_order(tesda, manual, commits=None):
+    return list(dict.fromkeys(list(tesda) + [m["project"] for m in manual] + list(commits or {})))
 
 
 def _session_evidence(s, max_prompts, prompt_len, ranged=False):
@@ -585,36 +704,42 @@ def _session_evidence(s, max_prompts, prompt_len, ranged=False):
     return out
 
 
-def days_in_period(tesda, manual, start, end, workdays):
-    """For a range: [(day, {project: sessions}, [manual entries])] for every day with evidence,
-    plus workdays with nothing (so 'no work captured' is visible). Weekends only if worked."""
+def days_in_period(tesda, manual, start, end, workdays, commits=None):
+    """For a range: [(day, {project: sessions}, [manual entries], {project: commits})] for every day
+    with evidence, plus workdays with nothing (so 'no work captured' is visible). Weekends only if worked."""
     out = []
     d = start
     while d <= end:
         t = {p: [x for x in ss if x["day"] == d] for p, ss in tesda.items()}
         t = {p: ss for p, ss in t.items() if ss}
         m = [x for x in manual if x["_t"].date() == d]
-        if t or m or d.weekday() in workdays:
-            out.append((d, t, m))
+        g = {p: [c for c in cs if c["day"] == d] for p, cs in (commits or {}).items()}
+        g = {p: cs for p, cs in g.items() if cs}
+        if t or m or g or d.weekday() in workdays:
+            out.append((d, t, m, g))
         d += timedelta(days=1)
     return out
 
 
-def _projects_evidence(tesda, manual, max_prompts, prompt_len):
+def _projects_evidence(tesda, manual, max_prompts, prompt_len, commits=None):
     out = []
-    for project in _project_order(tesda, manual):
+    commits = commits or {}
+    for project in _project_order(tesda, manual, commits):
         out.append(f"=== PROJECT: {project} ===")
         mine = [m for m in manual if m["project"] == project]
         if mine:
             out.append("Logged by the user (true and done):")
             out += [f"  - [{m['_t']:%H:%M}] {m['text']}" for m in mine]
+        if commits.get(project):
+            out.append("Git commits by the user (finished work):")
+            out += [f"  - [{c['t']:%H:%M}] {_commit_line(c)}" for c in commits[project][:40]]
         for s in tesda.get(project, []):
             out += _session_evidence(s, max_prompts, prompt_len)
         out.append("")
     return out
 
 
-def evidence_text(day, tesda, manual, budget=None, end=None, workdays=None):
+def evidence_text(day, tesda, manual, budget=None, end=None, workdays=None, commits=None):
     """Plain-text evidence. Only TESDA projects and manual entries; Needs-review sessions are never included.
     For a range, it's grouped by date first, then by project."""
     ranged = bool(end and end != day)
@@ -622,13 +747,13 @@ def evidence_text(day, tesda, manual, budget=None, end=None, workdays=None):
     for max_prompts, prompt_len in ((15, 600), (8, 300), (4, 160), (2, 100)):
         out = [f"EVIDENCE FOR {pretty_period(day, end).upper()}", ""]
         if ranged:
-            for d, t, m in days_in_period(tesda, manual, day, end, workdays or {0, 1, 2, 3, 4}):
+            for d, t, m, g in days_in_period(tesda, manual, day, end, workdays or {0, 1, 2, 3, 4}, commits):
                 out.append(f"##### DATE: {pretty_day(d).upper()}")
-                if not t and not m:
+                if not t and not m and not g:
                     out += ["(no TESDA work captured)", ""]
-                out += _projects_evidence(t, m, max_prompts, prompt_len)
+                out += _projects_evidence(t, m, max_prompts, prompt_len, g)
         else:
-            out += _projects_evidence(tesda, manual, max_prompts, prompt_len)
+            out += _projects_evidence(tesda, manual, max_prompts, prompt_len, commits)
         text = "\n".join(out)
         if len(text) <= budget:
             return text
@@ -642,8 +767,12 @@ an official work log, so it must be accurate.
 The evidence for {period} is included in this message, {grouping}. There are two kinds:
 1. "Logged by the user": entries the user typed by hand (meetings, QA, coordination, documentation…). \
 Treat them as true and completed unless the text says otherwise.
-2. "Claude Code session": what the user asked their AI coding assistant to do, the files that were \
-changed, notable commands (✓ succeeded / ✗ failed), and the assistant's final message.
+2. "Git commits by the user": commits they made (on any branch). A commit is evidence that the work \
+was done, even when no Claude Code session mentions it. Describe what the commit achieved in plain \
+words; don't copy prefixes like [FEAT] or list hashes.
+3. "Claude Code session": what the user asked their AI coding assistant to do, the files that were \
+changed, notable commands (✓ succeeded / ✗ failed), and the assistant's final message. A later commit \
+can show that work a session left unfinished was completed after all.
 
 Write the report in Markdown, in English, in exactly this shape:
 
@@ -782,13 +911,16 @@ def clean_ai_output(text, title):
 
 # ---------------------------------------------------------------- report text
 
-def _raw_projects(tesda, manual, level="##"):
+def _raw_projects(tesda, manual, level="##", commits=None):
     out = []
-    for project in _project_order(tesda, manual):
+    commits = commits or {}
+    for project in _project_order(tesda, manual, commits):
         out += [f"{level} {project}", ""]
         mine = [m for m in manual if m["project"] == project]
         if mine:
             out += ["**Logged by you**"] + [f"- {m['_t']:%H:%M} — {m['text']}" for m in mine] + [""]
+        if commits.get(project):
+            out += ["**Git commits**"] + [f"- {c['t']:%H:%M} — {_commit_line(c)}" for c in commits[project]] + [""]
         ss = tesda.get(project, [])
         if ss:
             out.append("**Claude Code sessions**")
@@ -814,7 +946,7 @@ def _raw_projects(tesda, manual, level="##"):
     return out
 
 
-def raw_body(day, tesda, manual, warning=None, end=None, workdays=None):
+def raw_body(day, tesda, manual, warning=None, end=None, workdays=None, commits=None):
     ranged = bool(end and end != day)
     out = [report_title(day, end), ""]
     if warning:
@@ -823,16 +955,18 @@ def raw_body(day, tesda, manual, warning=None, end=None, workdays=None):
     else:
         out += ["> Raw evidence (no AI summary). Turn it into accomplishment bullets before you submit it.", ""]
     if ranged:
-        for d, t, m in days_in_period(tesda, manual, day, end, workdays or {0, 1, 2, 3, 4}):
+        for d, t, m, g in days_in_period(tesda, manual, day, end, workdays or {0, 1, 2, 3, 4}, commits):
             out += [f"## {pretty_day(d)}", ""]
-            out += _raw_projects(t, m, "###") if (t or m) else ["_No TESDA work captured._", ""]
+            out += _raw_projects(t, m, "###", g) if (t or m or g) else ["_No TESDA work captured._", ""]
     else:
-        out += _raw_projects(tesda, manual)
+        out += _raw_projects(tesda, manual, commits=commits)
     return "\n".join(out).rstrip() + "\n"
 
 
-def appendix(review, tesda, generated_at, ai_status, cfg, ranged=False):
+def appendix(review, tesda, generated_at, ai_status, cfg, ranged=False, git_warnings=()):
     out = []
+    if git_warnings:
+        out += ["---", "", "## Git", ""] + [f"- {w}" for w in git_warnings] + [""]
     if review:
         out += ["---", "", "## Needs review", "",
                 "_These Claude Code sessions are in folders that aren't in config.json, so they were **not** used "
@@ -1071,26 +1205,27 @@ def build_report(day, cfg, use_ai=True, projects_dir=None, end=None):
         sessions = read_sessions(day, projects_dir, end=end)
         tesda, review, _excluded = group(sessions, cfg)
         manual = read_manual(day, end)
+        commits, git_warnings = read_commits(day, cfg, end)
         title = report_title(day, end)
         error = None
-        if not tesda and not manual:
+        if not tesda and not manual and not commits:
             ai_status = "empty"
             body = (f"{title}\n\n_No TESDA work was captured for this {'period' if ranged else 'day'}: no Claude "
-                    "Code sessions in your TESDA folders and nothing logged by hand._\n")
+                    "Code sessions in your TESDA folders, no commits, and nothing logged by hand._\n")
         elif use_ai:
             try:
-                evidence = evidence_text(day, tesda, manual, end=end, workdays=cfg["_workdays"])
+                evidence = evidence_text(day, tesda, manual, end=end, workdays=cfg["_workdays"], commits=commits)
                 body = clean_ai_output(ask_claude(evidence, build_prompt(day, end), cfg), title)
                 ai_status = "ok"
             except WorklogError as ex:
                 ai_status, error = "failed", str(ex)
-                body = raw_body(day, tesda, manual, warning=error, end=end, workdays=cfg["_workdays"])
+                body = raw_body(day, tesda, manual, warning=error, end=end, workdays=cfg["_workdays"], commits=commits)
         else:
             ai_status = "off"
-            body = raw_body(day, tesda, manual, end=end, workdays=cfg["_workdays"])
+            body = raw_body(day, tesda, manual, end=end, workdays=cfg["_workdays"], commits=commits)
 
         now = datetime.now()
-        md = body.rstrip() + "\n\n" + APPENDIX_MARK + "\n" + appendix(review, tesda, now, ai_status, cfg, ranged)
+        md = body.rstrip() + "\n\n" + APPENDIX_MARK + "\n" + appendix(review, tesda, now, ai_status, cfg, ranged, git_warnings)
         paths, warning = report_paths(day, cfg, end)
         try:
             _atomic_write(paths["md"], md)
@@ -1105,7 +1240,8 @@ def build_report(day, cfg, use_ai=True, projects_dir=None, end=None):
             "generated_at": now.isoformat(timespec="seconds"),
             "ai": ai_status, "error": error, "warning": warning, "model": cfg.get("model"),
             "sessions": sum(len(v) for v in tesda.values()), "manual": len(manual), "review": len(review),
-            "projects": _project_order(tesda, manual),
+            "commits": sum(len(v) for v in commits.values()), "git_warnings": git_warnings,
+            "projects": _project_order(tesda, manual, commits),
             **{k: str(v) for k, v in paths.items()},
         }
         _atomic_write(paths["txt"], md_to_text(body))
@@ -1135,7 +1271,9 @@ def _clear_running():
 
 def summary_line(meta):
     s = (f"{meta['sessions']} session{'s' if meta['sessions'] != 1 else ''}, "
-         f"{meta['manual']} logged item{'s' if meta['manual'] != 1 else ''} · {meta['review']} to review")
+         f"{meta['manual']} logged item{'s' if meta['manual'] != 1 else ''}"
+         + (f", {meta['commits']} commit{'s' if meta['commits'] != 1 else ''}" if meta.get("commits") else "")
+         + f" · {meta['review']} to review")
     if meta["ai"] == "failed":
         s += " · AI summary failed"
     return s
@@ -1448,6 +1586,23 @@ def cmd_sessions(args, cfg):
             print(f"  {m['_t']:%H:%M}  [{m['project']}]  {m['text']}")
 
 
+def cmd_commits(args, cfg):
+    start, end = resolve_period(args.day or "today", cfg)
+    commits, warnings = read_commits(start, cfg, end)
+    repos, _ = project_repos(cfg)
+    print(f"Your git commits, {pretty_period(start, end)}:")
+    for project, entries in repos.items():
+        print(f"  {project}: " + ", ".join(top + (f" (only {sub}/)" if sub else "") for top, sub in entries))
+    if not commits:
+        print("  (none)")
+    for project, cs in commits.items():
+        print(f"\n  [{project}]")
+        for c in cs:
+            print(f"    {c['t']:%a %b %d %H:%M}  {_commit_line(c)}")
+    for w in warnings:
+        print(f"  ⚠️  {w}")
+
+
 def cmd_folders(args, cfg):
     rows = list_folders(cfg)
     if not rows:
@@ -1484,7 +1639,7 @@ def cmd_archive(args, cfg):
 def main(argv=None):
     p = argparse.ArgumentParser(prog="worklog", description="TESDA Worklog: daily accomplishment reports "
                                 "from your Claude Code history and manual notes.")
-    sub = p.add_subparsers(dest="cmd", metavar="{report,log,sessions,folders,projects,archive,paths}")
+    sub = p.add_subparsers(dest="cmd", metavar="{report,log,sessions,commits,folders,projects,archive,paths}")
     r = sub.add_parser("report", help="build a report (default: previous workday)")
     r.add_argument("day", nargs="?", default="prev",
                    help="prev (default), today, yesterday, YYYY-MM-DD, or a range YYYY-MM-DD..YYYY-MM-DD")
@@ -1501,6 +1656,8 @@ def main(argv=None):
     s = sub.add_parser("sessions", help="list the sessions captured for a day")
     s.add_argument("day", nargs="?", default="today")
     sub.add_parser("folders", help="list every folder you've used Claude Code in")
+    cm = sub.add_parser("commits", help="list your git commits in the project repos for a day or range")
+    cm.add_argument("day", nargs="?", default="today")
     pr = sub.add_parser("projects", help="list project names from config.json")
     pr.add_argument("--log", action="store_true", help=argparse.SUPPRESS)   # choices for the Log dialog (JSON)
     ar = sub.add_parser("archive", help="TESDA transcript archive: status, or export a zip copy")
@@ -1530,6 +1687,8 @@ def main(argv=None):
             print(f"Logged to {e['project']}{new}: {e['text']}")
         elif args.cmd == "sessions":
             cmd_sessions(args, cfg)
+        elif args.cmd == "commits":
+            cmd_commits(args, cfg)
         elif args.cmd == "folders":
             cmd_folders(args, cfg)
         elif args.cmd == "projects":

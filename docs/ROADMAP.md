@@ -7,6 +7,7 @@
 - TESDA history archive until Jun 30 / Dec 31, with alerts and export
 - *Log something…* accepts any TESDA project (config projects, *General TESDA work*, or a new name), in a centered dialog
 - Installable from a git clone on any Mac
+- Git commit tracking (your commits on any branch, as evidence of finished work)
 
 ## Next
 
@@ -23,14 +24,11 @@ TESDA transcripts are already archived until Jun 30 / Dec 31. Next, snapshot eac
 - Window: add *This week*, *Last week*, *This month* and *Range…* to the period picker.
 - Prompt: group by project, then by theme (features, fixes, QA, coordination). Count deliverables, not hours.
 
-## 3. Git commit tracking
+## 3. Git commit tracking: next steps
 
-Commits are the strongest evidence of "done", and they also catch work done without Claude.
-
-- Config: `"git_author": "you@example.com"` and per-project repo folders (reuse `projects`).
-- For the report day, run `git log --since/--until --author --no-merges --format=…` in each repo (read-only), plus `--shortstat`.
-- Add a "Commits" block to the evidence. A commit counts as done even if no Claude session mentions it.
-- Watch out: repos on T7 can be read only when the drive is mounted. Note "repo not available" in the report instead of failing.
+Basic tracking is done (see README → *Git commits*). Possible extras:
+- Link to pull requests (`gh pr list --author @me --search "merged:DATE"`) and count PR reviews you did.
+- Show commits in the report window's status line with a link to each commit on GitHub/GitLab.
 
 ## 4. Holidays and configurable workdays
 

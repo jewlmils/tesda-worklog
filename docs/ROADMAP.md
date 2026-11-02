@@ -1,5 +1,15 @@
 # Roadmap
 
+## Done since the MVP
+
+- Octopus app icon, Dock app (`~/Applications/TESDA Worklog.app`) and octopus menu bar icon
+- Date-range reports with a mini calendar, written day by day
+- TESDA history archive until Jun 30 / Dec 31, with alerts and export
+- *Log something…* accepts any TESDA project (config projects, *General TESDA work*, or a new name), in a centered dialog
+- Installable from a git clone on any Mac
+
+## Next
+
 Next steps toward the long-term vision, roughly in the order they pay off. Each one builds on the MVP's shape: `worklog.py` does the work, and the menu bar app is a thin UI.
 
 ## 1. Evidence snapshots (pairs with the half-year archive)
@@ -49,3 +59,29 @@ Commits are the strongest evidence of "done", and they also catch work done with
 - Switch to native notifications (`UNUserNotificationCenter`) via a small signed `.app` bundle, so they show "TESDA Worklog" instead of *Script Editor* and clicking one opens the window.
 - Keyword rules as an *optional* second signal for shared folders (e.g. sessions in `~` whose title mentions "TRACK"). They would suggest, never auto-include.
 - A `worklog doctor` command that checks claude login, PATH, LaunchAgents, notification permission and transcript format in one go.
+
+## Windows version (after macOS)
+
+About 70% of the app is `worklog.py`, which is plain Python and mostly portable. Claude Code on Windows keeps the same `~\.claude\projects` JSONL files. What would change:
+
+| macOS piece | Windows equivalent |
+|---|---|
+| Swift menu bar app + WKWebView window | A tray app: Python + `pystray` + a small `pywebview` window (one codebase that could also replace the Swift app), or a native C#/WinUI app |
+| launchd LaunchAgents (8 AM + login catch-up) | Task Scheduler task (`schtasks /Create … /SC DAILY /ST 08:00` plus an "at log on" trigger) |
+| `osascript` notifications | Windows toast notifications (PowerShell `BurntToast`, or via the tray library) |
+| `~/Library/Application Support/TESDA-Worklog` | `%APPDATA%\TESDA-Worklog` |
+| `install.sh` | `install.ps1` |
+| Case-insensitive paths, `/` separators | Already case-insensitive in `under()`; normalise `\` to `/` |
+
+Suggested order:
+1. Make `worklog.py`'s paths, notifications and "open file" platform-aware, and run the tests on Windows.
+2. Add `install.ps1` + Task Scheduler.
+3. Add the tray UI.
+
+A cross-platform Python tray UI is worth considering *if* you want a single UI for both systems. The trade-off is that it needs pip packages, whereas the Mac version deliberately has no dependencies.
+
+## Sharing it without git (optional)
+
+- **A GitHub Release with a zipped `.app`** is quick, but without an Apple Developer ID ($99/yr) and notarization, macOS blocks it on other Macs ("app is damaged / can't be opened"). It's fine for your own Macs if you remove the quarantine flag (`xattr -dr com.apple.quarantine "TESDA Worklog.app"`), but not for colleagues.
+- **Sync history between your Macs:** let `archive/` (and `manual_log.jsonl`) live in iCloud Drive, so reports on either Mac see both Macs' TESDA sessions. Session IDs are unique, and `uuid` de-duplication already handles overlaps.
+

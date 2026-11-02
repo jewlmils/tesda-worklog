@@ -323,32 +323,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let choices = info["choices"] as? [String] ?? []
         let last = info["last"] as? String
 
-        let alert = NSAlert()
-        alert.messageText = "Log TESDA work"
-        alert.informativeText = "Meetings, QA, coordination, documentation: anything you didn't do in Claude Code. "
-            + "Pick a project or type a new one (e.g. Regional Office Support)."
-        let field = NSTextField(frame: NSRect(x: 0, y: 34, width: 360, height: 24))
-        field.placeholderString = "e.g. Attended TRACK sprint planning with the regional office"
-        let project = NSComboBox(frame: NSRect(x: 0, y: 0, width: 360, height: 26))
-        project.addItems(withObjectValues: choices)
-        project.completes = true                       // autocompletes names as you type
-        project.numberOfVisibleItems = min(max(choices.count, 3), 12)
-        project.placeholderString = "Project: pick one or type a new one"
-        project.stringValue = last ?? choices.first ?? ""
-        let box = NSView(frame: NSRect(x: 0, y: 0, width: 360, height: 60))
-        box.addSubview(field)
-        box.addSubview(project)
-        alert.accessoryView = box
-        alert.addButton(withTitle: "Log")
-        alert.addButton(withTitle: "Cancel")
-        NSApp.activate(ignoringOtherApps: true)
-        alert.window.initialFirstResponder = field
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-
-        let text = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
+        guard let (text, name) = LogPanel.ask(choices: choices, preselect: last ?? choices.first ?? "",
+                                              automation: automation != nil ? paths.inbox : nil) else { return }
         var args = ["log", text]
-        let name = project.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         if !name.isEmpty { args.append("--project=\(name)") }
         let r = WorklogRun(args).runNow()
         if r.status == 0 {
@@ -417,6 +394,111 @@ func openInEditor(_ url: URL) {
     p.executableURL = URL(fileURLWithPath: "/usr/bin/open")
     p.arguments = ["-t", url.path]
     try? p.run()
+}
+
+// MARK: - "Log something…" dialog
+
+/// A small centered dialog: app icon, title and description centered, then the entry field,
+/// the project box, and Cancel / Log. (NSAlert goes left-aligned once it has extra fields.)
+final class LogPanel: NSObject, NSWindowDelegate {
+    let panel: NSPanel
+    let field = NSTextField()
+    let project = NSComboBox()
+
+    private init(choices: [String], preselect: String) {
+        panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
+                        styleMask: [.titled, .closable, .fullSizeContentView], backing: .buffered, defer: false)
+        super.init()
+        panel.titlebarAppearsTransparent = true
+        panel.titleVisibility = .hidden
+        panel.isMovableByWindowBackground = true
+        panel.delegate = self
+
+        let icon = NSImageView(image: NSApp.applicationIconImage)
+        icon.imageScaling = .scaleProportionallyUpOrDown
+        let title = NSTextField(labelWithString: "Log TESDA work")
+        title.font = .boldSystemFont(ofSize: 15)
+        title.alignment = .center
+        let info = NSTextField(wrappingLabelWithString: "Meetings, QA, coordination, documentation: anything you didn't do "
+                               + "in Claude Code. Pick a project or type a new one.")
+        info.alignment = .center
+        info.font = .systemFont(ofSize: 12)
+        info.textColor = .secondaryLabelColor
+
+        field.placeholderString = "e.g. Attended TRACK sprint planning"
+        project.addItems(withObjectValues: choices)
+        project.completes = true                  // autocompletes names as you type
+        project.numberOfVisibleItems = min(max(choices.count, 3), 12)
+        project.placeholderString = "Project: pick one or type a new one"
+        project.stringValue = preselect
+
+        let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancelClicked))
+        cancel.keyEquivalent = "\u{1b}"           // Esc
+        let log = NSButton(title: "Log", target: self, action: #selector(logClicked))
+        log.keyEquivalent = "\r"                  // Return
+        let buttons = NSStackView(views: [cancel, log])
+        buttons.distribution = .fillEqually
+        buttons.spacing = 10
+
+        let stack = NSStackView(views: [icon, title, info, field, project, buttons])
+        stack.orientation = .vertical
+        stack.alignment = .centerX
+        stack.spacing = 10
+        stack.setCustomSpacing(6, after: title)
+        stack.setCustomSpacing(16, after: info)
+        stack.setCustomSpacing(18, after: project)
+        stack.edgeInsets = NSEdgeInsets(top: 26, left: 24, bottom: 20, right: 24)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        panel.contentView = stack
+        NSLayoutConstraint.activate([
+            icon.widthAnchor.constraint(equalToConstant: 64), icon.heightAnchor.constraint(equalToConstant: 64),
+            stack.widthAnchor.constraint(equalToConstant: 400),
+        ])
+        for v in [info, field, project, buttons] as [NSView] {
+            v.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -48).isActive = true
+        }
+        info.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        panel.initialFirstResponder = field
+    }
+
+    @objc private func cancelClicked() { NSApp.stopModal(withCode: .cancel) }
+    @objc private func logClicked() { NSApp.stopModal(withCode: .OK) }
+    func windowWillClose(_ notification: Notification) { NSApp.stopModal(withCode: .cancel) }
+
+    /// Layout facts for the automated test (frames in window coordinates).
+    private func layoutReport() -> [String: Any] {
+        let mid = panel.contentView!.bounds.midX
+        var out: [String: Any] = ["windowMidX": Int(mid)]
+        for (i, v) in (panel.contentView as! NSStackView).arrangedSubviews.enumerated() {
+            let r = v.convert(v.bounds, to: nil)
+            out["\(i)"] = ["midX": Int(r.midX), "width": Int(r.width),
+                           "align": (v as? NSTextField)?.alignment == .center ? "center" : ""]
+        }
+        return out
+    }
+
+    /// Shows the dialog and waits. Returns (text, project) or nil if cancelled.
+    static func ask(choices: [String], preselect: String, automation inbox: URL? = nil) -> (String, String)? {
+        let me = LogPanel(choices: choices, preselect: preselect)
+        me.panel.center()
+        NSApp.activate(ignoringOtherApps: true)
+        me.panel.makeKeyAndOrderFront(nil)
+        if let inbox = inbox {   // test mode: record the layout, then cancel by itself
+            let t = Timer(timeInterval: 1.0, repeats: false) { _ in
+                if let d = try? JSONSerialization.data(withJSONObject: me.layoutReport(), options: [.sortedKeys]) {
+                    try? d.write(to: inbox.appendingPathComponent("logpanel-layout.json"))
+                }
+                NSApp.stopModal(withCode: .cancel)
+            }
+            RunLoop.main.add(t, forMode: .modalPanel)
+        }
+        let code = NSApp.runModal(for: me.panel)
+        me.panel.orderOut(nil)
+        guard code == .OK else { return nil }
+        let text = me.field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return nil }
+        return (text, me.project.stringValue.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
 }
 
 // MARK: - Mini range calendar
@@ -1107,6 +1189,7 @@ final class Automation {
         switch c["cmd"] as? String ?? "" {
         case "menu":
             if c["target"] as? String == "report" { app.getReportNow() }
+            if c["target"] as? String == "log" { DispatchQueue.main.async { self.app.logSomething() } }
         case "period":
             w.periodPopup.selectItem(at: c["index"] as? Int ?? 0)
             if let d = c["date"] as? String, let date = isoDay.date(from: d) { w.datePicker.dateValue = date }

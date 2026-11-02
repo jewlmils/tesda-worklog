@@ -316,6 +316,67 @@ class Scheduled(unittest.TestCase):
         self.assertEqual(self.calls, [])
 
 
+class Archive(unittest.TestCase):
+    def setUp(self):
+        shutil.rmtree(worklog.ARCHIVE, ignore_errors=True)
+        if worklog.STATE_PATH.exists():
+            worklog.STATE_PATH.unlink()
+        self.alerts = []
+
+    tearDown = setUp
+
+    def alert(self, title, message):
+        self.alerts.append((title, message))
+
+    def test_sync_copies_only_tesda_transcripts(self):
+        self.assertEqual(worklog.archive_sync(cfg()), 2)
+        names = sorted(f.name[:4] for f in worklog.archive_files())
+        self.assertEqual(names, ["aaaa", "bbbb"])
+        self.assertEqual(worklog.archive_sync(cfg()), 0)            # unchanged files aren't copied again
+
+    def test_reports_still_work_after_claude_deletes_transcripts(self):
+        worklog.archive_sync(cfg())
+        empty = TMP / "no-live-transcripts"
+        empty.mkdir(exist_ok=True)
+        found = {s["id"][:4] for s in worklog.read_sessions(FRI, projects_dir=empty)}
+        self.assertEqual(found, {"aaaa", "bbbb"})
+        both = [s["id"][:4] for s in worklog.read_sessions(FRI)]  # live + archive: no duplicates
+        self.assertEqual(sorted(both), ["aaaa", "bbbb", "cccc", "dddd"])
+
+    def test_purge_dates(self):
+        c = cfg()
+        self.assertEqual(worklog.next_purge(c, date(2026, 11, 2)), date(2026, 12, 31))
+        self.assertEqual(worklog.next_purge(c, date(2027, 1, 1)), date(2027, 6, 30))
+        self.assertEqual(worklog.last_purge_due(c, date(2026, 12, 31)), date(2026, 6, 30))
+        self.assertEqual(worklog.last_purge_due(c, date(2027, 1, 1)), date(2026, 12, 31))
+
+    def test_alerts_before_and_purge_after_dec_31(self):
+        c = cfg()
+        run = lambda y, m, d: worklog.archive_maintenance(c, datetime(y, m, d, 8, 0), alert=self.alert)
+        run(2026, 11, 2)                                 # first run: archives, no alert yet
+        self.assertEqual((len(worklog.archive_files()), self.alerts), (2, []))
+        run(2026, 12, 24)                                # 7 days before: alert
+        run(2026, 12, 25)                                # no repeat
+        self.assertEqual(len(self.alerts), 1)
+        self.assertIn("2 archived TESDA session", self.alerts[0][1])
+        self.assertIn("December 31", self.alerts[0][1])
+        run(2026, 12, 31)                                # on the day: last-chance alert
+        self.assertEqual(len(self.alerts), 2)
+        self.assertIn("tonight", self.alerts[1][0])
+        self.assertEqual(len(worklog.archive_files()), 2)  # nothing deleted yet
+        run(2027, 1, 1)                                  # the morning after: purged
+        self.assertEqual(worklog.archive_files(), [])
+        run(2027, 1, 2)                                  # old live transcripts aren't re-archived
+        self.assertEqual(worklog.archive_files(), [])
+        self.assertTrue((HERE / "fixtures" / "projects").exists())   # ~/.claude/projects is never touched
+
+    def test_export_zip(self):
+        worklog.archive_sync(cfg())
+        out = worklog.archive_export(cfg())
+        import zipfile
+        self.assertEqual(len(zipfile.ZipFile(out).namelist()), 2)
+
+
 class Rendering(unittest.TestCase):
     def test_markdown_to_html(self):
         out = worklog.md_to_html("# T\n\n**Accomplishments**\n- a `x<y>`\n  - nested\n- b\n\n> warn\n\n| A | B |\n|---|---|\n| 1 | 2 |")

@@ -167,6 +167,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(item("Log something…", #selector(logSomething), "l"))
         menu.addItem(.separator())
         menu.addItem(item("Open reports folder", #selector(openReports), ""))
+        menu.addItem(item("Export TESDA history…", #selector(exportArchive), ""))
         menu.addItem(item("Settings (config.json)", #selector(openSettings), ","))
         menu.addItem(.separator())
         menu.addItem(item("Quit TESDA Worklog", #selector(quit), "q"))
@@ -224,6 +225,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             try? FileManager.default.removeItem(at: req)   // tells worklog.py we got it
             if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any], let day = obj["day"] as? String {
                 window().present(day: day)
+            }
+        }
+        let alertReq = paths.inbox.appendingPathComponent("alert.json")
+        if let data = try? Data(contentsOf: alertReq) {
+            try? FileManager.default.removeItem(at: alertReq)
+            if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let title = obj["title"] as? String, let message = obj["message"] as? String,
+               Date().timeIntervalSince1970 - (obj["at"] as? Double ?? 0) < 3 * 86400 {   // ignore stale ones
+                DispatchQueue.main.async { self.showArchiveAlert(title, message) }
             }
         }
         statusItem.button?.appearsDisabled = windowBusy || externalReportRunning()
@@ -288,6 +298,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         paths = Paths.load()
         try? FileManager.default.createDirectory(at: paths.reportsDir, withIntermediateDirectories: true)
         NSWorkspace.shared.open(paths.reportsDir)
+    }
+
+    /// "Your TESDA history will be deleted…" from the morning job.
+    func showArchiveAlert(_ title: String, _ message: String) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Export a copy…")
+        alert.addButton(withTitle: "Get report now…")
+        alert.addButton(withTitle: "OK")
+        NSApp.activate(ignoringOtherApps: true)
+        switch alert.runModal() {
+        case .alertFirstButtonReturn: exportArchive()
+        case .alertSecondButtonReturn: getReportNow()
+        default: break
+        }
+    }
+
+    /// Zips the TESDA transcript archive into the reports folder and shows it in Finder.
+    @objc func exportArchive() {
+        WorklogRun(["archive", "export"]).start { r in
+            let out = r.out.trimmingCharacters(in: .whitespacesAndNewlines)
+            if r.status == 0, out.hasPrefix("Exported to ") {
+                let url = URL(fileURLWithPath: String(out.dropFirst("Exported to ".count)))
+                NSWorkspace.shared.activateFileViewerSelecting([url])
+            } else {
+                let a = NSAlert()
+                a.messageText = r.status == 0 ? "Nothing to export" : "Couldn't export"
+                a.informativeText = r.status == 0 ? out : (r.err.isEmpty ? out : r.err)
+                NSApp.activate(ignoringOtherApps: true)
+                a.runModal()
+            }
+        }
     }
 
     @objc func openSettings() {

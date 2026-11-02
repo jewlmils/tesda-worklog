@@ -49,6 +49,7 @@ RUNNING_PATH = DATA_DIR / "running.json"   # exists while a report is being writ
 INBOX = DATA_DIR / "inbox"                 # "show this report" requests for the menu bar app
 DEFAULT_REPORTS = DATA_DIR / "reports"     # ~/Documents/TESDA-Worklog/reports links here (see install.sh)
 OLD_DEFAULT_REPORTS = "~/Documents/TESDA-Worklog/reports"
+ARCHIVE = DATA_DIR / "archive"             # copies of TESDA transcripts, kept until the half-year purge
 
 APPENDIX_MARK = "<!-- appendix: not part of the report you submit -->"
 WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
@@ -61,6 +62,8 @@ DEFAULT_CONFIG = {
         "Run `worklog folders` to see every folder you've used Claude Code in.",
         "workdays: which days count as workdays (the report covers the previous one).",
         "report_time: when the morning report runs (24h). Re-run install.sh after changing it.",
+        "archive_purge_dates: TESDA transcripts are copied to the app's archive (so they outlive Claude Code's "
+        "30-day cleanup) and deleted the morning after these dates (MM-DD). You're alerted archive_warn_days before.",
         "reports_dir: leave empty. Reports are then kept in the app folder, and ~/Documents/TESDA-Worklog/reports "
         "links to them (macOS blocks background jobs from rewriting files in Documents).",
     ],
@@ -76,6 +79,8 @@ DEFAULT_CONFIG = {
     "claude_path": "",
     "claude_timeout_seconds": 300,
     "open_report": True,
+    "archive_purge_dates": ["06-30", "12-31"],
+    "archive_warn_days": 7,
 }
 
 FILE_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
@@ -339,12 +344,14 @@ def read_sessions(day, projects_dir=None):
     A session that runs past midnight therefore shows up on both days, each with its own part.
     """
     projects_dir = Path(projects_dir or CLAUDE_PROJECTS)
-    if not projects_dir.is_dir():
-        return []
     day_start = datetime.combine(day, dtime.min).timestamp()
     sessions, titles, seen = {}, {}, set()
+    live = sorted(projects_dir.glob("*/*.jsonl")) if projects_dir.is_dir() else []
+    live_names = {(f.parent.name, f.name) for f in live}
+    archived = [f for f in sorted(ARCHIVE.glob("*/*.jsonl")) if (f.parent.name, f.name) not in live_names] \
+        if ARCHIVE.is_dir() else []
 
-    for f in sorted(projects_dir.glob("*/*.jsonl")):
+    for f in live + archived:
         try:
             if f.stat().st_mtime < day_start:      # untouched since before that day: nothing to find
                 continue
@@ -892,6 +899,10 @@ def build_report(day, cfg, use_ai=True, projects_dir=None):
     """Collects evidence for `day`, writes YYYY-MM-DD.{md,html,txt,json}, returns the metadata dict."""
     _mark_running(day)
     try:
+        try:
+            archive_sync(cfg, projects_dir)
+        except OSError:
+            pass
         sessions = read_sessions(day, projects_dir)
         tesda, review, _excluded = group(sessions, cfg)
         manual = read_manual(day)
@@ -963,6 +974,156 @@ def summary_line(meta):
     return s
 
 
+# ---------------------------------------------------------------- TESDA transcript archive
+#
+# Claude Code deletes transcripts after 30 days (all projects). To keep TESDA history for the
+# half-year, TESDA transcripts are COPIED here; ~/.claude/projects itself is never modified.
+# The morning after each purge date (Jun 30, Dec 31) the archive is emptied, after alerts.
+
+def transcript_cwd(f):
+    try:
+        with f.open(encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if '"cwd"' not in line:
+                    continue
+                try:
+                    e = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(e, dict) and e.get("type") in ("user", "assistant") and e.get("cwd"):
+                    return e["cwd"]
+    except OSError:
+        pass
+    return None
+
+
+def archive_sync(cfg, projects_dir=None):
+    """Copy new or changed TESDA transcripts into the archive. Returns how many were copied."""
+    projects_dir = Path(projects_dir or CLAUDE_PROJECTS)
+    if not projects_dir.is_dir():
+        return 0
+    cutoff = read_state().get("archive_purged_through")
+    not_before = datetime.combine(date.fromisoformat(cutoff) + timedelta(days=1), dtime.min).timestamp() if cutoff else 0
+    copied = 0
+    for f in projects_dir.glob("*/*.jsonl"):
+        try:
+            st = f.stat()
+        except OSError:
+            continue
+        if st.st_mtime < not_before:           # belongs to a half-year that was already purged
+            continue
+        dest = ARCHIVE / f.parent.name / f.name
+        try:
+            d = dest.stat()
+            if d.st_size == st.st_size and int(d.st_mtime) == int(st.st_mtime):
+                continue
+        except OSError:
+            pass
+        cwd = transcript_cwd(f)
+        if not cwd or classify(cwd, cfg)[0] != "project":
+            continue
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.copy2(f, dest)
+            copied += 1
+        except OSError:
+            continue
+    return copied
+
+
+def _purge_dates(cfg, years):
+    out = []
+    for y in years:
+        for mmdd in cfg.get("archive_purge_dates") or []:
+            try:
+                m, d = (int(x) for x in str(mmdd).split("-"))
+                out.append(date(y, m, d))
+            except ValueError:
+                raise WorklogError(f"archive_purge_dates: {mmdd!r} should look like \"12-31\".")
+    return sorted(out)
+
+
+def next_purge(cfg, today):
+    later = [d for d in _purge_dates(cfg, (today.year, today.year + 1)) if d >= today]
+    return later[0] if later else None
+
+
+def last_purge_due(cfg, today):
+    """The most recent purge date that has fully passed (the purge runs the morning after)."""
+    passed = [d for d in _purge_dates(cfg, (today.year - 1, today.year)) if d < today]
+    return passed[-1] if passed else None
+
+
+def archive_files(until=None):
+    files = sorted(ARCHIVE.glob("*/*.jsonl")) if ARCHIVE.is_dir() else []
+    if until:
+        end = datetime.combine(until + timedelta(days=1), dtime.min).timestamp()
+        files = [f for f in files if f.stat().st_mtime < end]
+    return files
+
+
+def archive_purge(through):
+    """Delete archived transcripts last changed on or before `through`. Only touches the archive."""
+    removed = 0
+    for f in archive_files(until=through):
+        f.unlink()
+        removed += 1
+    for d in list(ARCHIVE.glob("*")) if ARCHIVE.is_dir() else []:
+        if d.is_dir() and not any(d.iterdir()):
+            d.rmdir()
+    return removed
+
+
+def archive_export(cfg):
+    """Zip the archive into the reports folder. Returns the zip path (or None if empty)."""
+    import zipfile
+    files = archive_files()
+    if not files:
+        return None
+    folder, _ = reports_dir(cfg)
+    out = folder / f"TESDA-transcripts-{date.today().isoformat()}.zip"
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+        for f in files:
+            z.write(f, f"{f.parent.name}/{f.name}")
+    return out
+
+
+def archive_maintenance(cfg, now=None, alert=None):
+    """Runs every day from the morning job: archive, purge after a purge date, warn before one."""
+    now = now or datetime.now()
+    today = now.date()
+    alert = alert or send_alert
+    state = read_state()
+    due = last_purge_due(cfg, today)
+    if due and state.get("archive_purged_through", "") < due.isoformat():
+        removed = archive_purge(due)
+        state = read_state()
+        state["archive_purged_through"] = due.isoformat()
+        _write_state(state)
+        print(f"[{now:%Y-%m-%d %H:%M:%S}] Archive: purged {removed} TESDA transcript(s) up to {due}.")
+    copied = archive_sync(cfg)
+    nxt = next_purge(cfg, today)
+    if nxt:
+        days_left = (nxt - today).days
+        warn_days = int(cfg.get("archive_warn_days", 7))
+        warned = set(state.get("archive_warned") or [])
+        for stage in sorted({warn_days, 0}, reverse=True):
+            key = f"{nxt.isoformat()}:{stage}"
+            if days_left <= stage and key not in warned:
+                n = len(archive_files())
+                when = "tonight" if days_left == 0 else f"on {nxt:%b} {nxt.day} ({days_left} days)"
+                alert("TESDA history will be deleted " + ("tonight" if days_left == 0 else "soon"),
+                      f"{n} archived TESDA session transcript(s) will be deleted {when}, at the end of "
+                      f"{nxt:%B} {nxt.day}. Generate any reports you need before then, or export a copy. "
+                      "Your saved reports and logged entries are kept.")
+                state = read_state()
+                state["archive_warned"] = sorted(set(state.get("archive_warned") or []) | {key})
+                _write_state(state)
+                break
+    if copied:
+        print(f"[{now:%Y-%m-%d %H:%M:%S}] Archive: copied {copied} TESDA transcript(s).")
+
+
 # ---------------------------------------------------------------- delivery
 
 def notify(title, message):
@@ -1001,11 +1162,28 @@ def read_state():
         return {}
 
 
+def _write_state(state):
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    _atomic_write(STATE_PATH, json.dumps(state, indent=2))
+
+
+def send_alert(title, message):
+    """Notification, plus a dialog with an "Export a copy" button if the menu bar app is running."""
+    notify(title, message)
+    INBOX.mkdir(parents=True, exist_ok=True)
+    _atomic_write(INBOX / "alert.json", json.dumps({"title": title, "message": message, "action": "export-archive",
+                                                         "at": time.time()}))
+
+
 def run_scheduled(cfg, now=None):
     """The 8 AM job. Also runs at login/wake, so it decides for itself whether there's work to do."""
     now = now or datetime.now()
     today = now.date()
     stamp = f"[{now:%Y-%m-%d %H:%M:%S}]"
+    try:
+        archive_maintenance(cfg, now)
+    except Exception as ex:    # never let housekeeping block the report
+        print(f"{stamp} Archive maintenance failed: {ex}", file=sys.stderr)
     if today.weekday() not in cfg["_workdays"]:
         print(f"{stamp} Not a workday; nothing to do.")
         return None
@@ -1029,8 +1207,9 @@ def run_scheduled(cfg, now=None):
     notify("TESDA Worklog — report ready", summary_line(meta))
     if cfg.get("open_report", True):
         print(f"{stamp} Shown in: {show_report(meta, wait=10)}")
+    state = read_state()
     state["last_scheduled"] = today.isoformat()
-    _atomic_write(STATE_PATH, json.dumps(state))
+    _write_state(state)
     return meta
 
 
@@ -1113,10 +1292,31 @@ def cmd_folders(args, cfg):
     print(f"\nEdit {CONFIG_PATH} to put TESDA folders under \"projects\" and the rest under \"exclude\".")
 
 
+def cmd_archive(args, cfg):
+    if args.action == "export":
+        out = archive_export(cfg)
+        print(f"Exported to {out}" if out else "The archive is empty; nothing to export.")
+        return
+    copied = archive_sync(cfg)
+    if args.action == "sync":
+        print(f"Copied {copied} TESDA transcript(s) into the archive.")
+        return
+    files = archive_files()
+    size = sum(f.stat().st_size for f in files)
+    oldest = min((datetime.fromtimestamp(f.stat().st_mtime) for f in files), default=None)
+    nxt = next_purge(cfg, date.today())
+    print(f"Archive: {ARCHIVE}\n  {len(files)} TESDA transcript(s), {size / 1e6:.1f} MB"
+          + (f", oldest last changed {oldest:%Y-%m-%d}" if oldest else ""))
+    if nxt:
+        print(f"  Next purge: end of {nxt:%B} {nxt.day}, {nxt.year} "
+              f"(alerts {cfg.get('archive_warn_days', 7)} days before and on the day)")
+    print("  Export a copy any time: worklog archive export")
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="worklog", description="TESDA Worklog: daily accomplishment reports "
                                 "from your Claude Code history and manual notes.")
-    sub = p.add_subparsers(dest="cmd", metavar="{report,log,sessions,folders,projects,paths}")
+    sub = p.add_subparsers(dest="cmd", metavar="{report,log,sessions,folders,projects,archive,paths}")
     r = sub.add_parser("report", help="build a report (default: previous workday)")
     r.add_argument("day", nargs="?", default="prev", help="prev (default), today, yesterday or YYYY-MM-DD")
     r.add_argument("--no-ai", action="store_true", help="skip Claude; just list the raw evidence")
@@ -1131,6 +1331,8 @@ def main(argv=None):
     s.add_argument("day", nargs="?", default="today")
     sub.add_parser("folders", help="list every folder you've used Claude Code in")
     sub.add_parser("projects", help="list project names from config.json")
+    ar = sub.add_parser("archive", help="TESDA transcript archive: status, or export a zip copy")
+    ar.add_argument("action", nargs="?", default="status", choices=["status", "export", "sync"])
     rs = sub.add_parser("resolve", help=argparse.SUPPRESS)
     rs.add_argument("day", nargs="?", default="prev")
     pa = sub.add_parser("paths", help="show where files live")
@@ -1158,6 +1360,8 @@ def main(argv=None):
             cmd_folders(args, cfg)
         elif args.cmd == "projects":
             print("\n".join(cfg["projects"]))
+        elif args.cmd == "archive":
+            cmd_archive(args, cfg)
         elif args.cmd == "resolve":
             print(resolve_day(args.day, cfg).isoformat())
         elif args.cmd == "paths":
@@ -1173,6 +1377,9 @@ def main(argv=None):
                 user["claude_path"], changed = args.claude_path, True
             if user.get("reports_dir") == OLD_DEFAULT_REPORTS:     # older default: Documents (see README)
                 user["reports_dir"], changed = "", True
+            for key, value in DEFAULT_CONFIG.items():             # new settings after an update
+                if key not in user or (key == "_help" and user[key] != value):
+                    user[key], changed = value, True
             if changed:
                 CONFIG_PATH.write_text(json.dumps(user, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
                 cfg = load_config()

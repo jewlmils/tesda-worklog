@@ -2,9 +2,9 @@
 
 Next steps toward the long-term vision, roughly in the order they pay off. Each one builds on the MVP's shape: `worklog.py` does the work, and the menu bar app is a thin UI.
 
-## 1. Keep more history (do this first; it's a setting)
+## 1. Evidence snapshots (pairs with the half-year archive)
 
-Claude Code deletes transcripts after 30 days. Set `"cleanupPeriodDays": 365` in `~/.claude/settings.json` before weekly or monthly reports matter. Optionally, also snapshot each day's *evidence* into `reports/YYYY-MM-DD.evidence.json` when a report is generated. Monthly reports could then be built even after transcripts are gone, and the summary would be reproducible.
+TESDA transcripts are already archived until Jun 30 / Dec 31. Next, snapshot each day's *evidence* into `reports/YYYY-MM-DD.evidence.json` when a report is generated. It's tiny, it survives the purge, and it would let a semester report (IPCR-style) be rebuilt even after the archive is emptied. It also makes summaries reproducible.
 
 ## 2. Weekly, monthly and custom reports
 

@@ -7,6 +7,7 @@ A small macOS menu bar utility. Every weekday morning it gives you a report of w
 - **TESDA only:** only folders you list count. Anything unknown goes under *Needs review* and is never added on its own.
 - **Honest summary:** your own `claude` CLI (Claude Pro, no API key) turns the evidence into concise bullets. It never invents work, and anything unfinished goes under *In progress / attempted*.
 - **On demand:** **Get report now…** (⌘R) for today so far, the previous workday, or any date.
+- **Keeps TESDA history for the half-year:** TESDA transcripts are archived until Jun 30 / Dec 31, with an alert beforehand. Other projects keep Claude Code's normal 30 days.
 
 Python 3 (standard library only) + one Swift file + launchd. No database, server, Node, or API key.
 
@@ -76,6 +77,8 @@ Then edit:
 | `model` | Passed to `claude --model`. `sonnet` is fast and good at this. |
 | `claude_path` | Full path to `claude`, if it can't be found automatically. |
 | `open_report` | `false` = notification only; the report window doesn't open in the morning. |
+| `archive_purge_dates` | When the TESDA history archive is emptied (`MM-DD`, default `["06-30", "12-31"]`). See *TESDA history*. |
+| `archive_warn_days` | How many days before a purge date you get the first alert (default 7). |
 | `reports_dir` | Leave empty (see *Where files live*). |
 
 > **Tip:** the folder is decided by where you *start* `claude`. Sessions started in your home folder (`~`) can't be told apart. Your TESDA-TRACK planning and your Appetiser QA both run there, so they land under *Needs review*. Start TESDA sessions inside a TESDA folder, or log that work by hand.
@@ -89,6 +92,7 @@ Then edit:
 | **Get report now… ⌘R** | Opens the report window. Pick **Today so far**, **Previous workday** or **Pick a date**, then **Generate**. A spinner shows while Claude writes (up to a minute), and **Cancel** stops it. If a report for that day already exists, it's shown right away with its *Generated at* time. Claude isn't called again unless you click **Regenerate**. |
 | **Log something… ⌘L** | One line of text + a project. It's added to that day's report and treated as true. |
 | Open reports folder | Opens the reports folder in Finder. |
+| Export TESDA history… | Zips the archived TESDA transcripts into the reports folder and shows the file in Finder. |
 | Settings (config.json) | Opens your config. |
 | Quit | Stops the icon until the next login. |
 
@@ -112,8 +116,22 @@ worklog log "Attended TRACK sprint planning" --project=TRACK      # partial name
 worklog log "Reviewed UAT checklist" --project=TSP --date=2026-10-30
 worklog sessions [DAY]          # what was captured and how each session was classified
 worklog folders                 # every folder you've used Claude Code in
+worklog archive                 # TESDA history archive: size, next purge date
+worklog archive export          # zip a copy into the reports folder
 worklog paths                   # where everything lives
 ```
+
+## TESDA history (6-month archive)
+
+Claude Code deletes *all* transcripts after 30 days. That setting is global, so it can't treat TESDA differently. TESDA Worklog handles it like this:
+
+- Every morning (and before every report), transcripts from your **TESDA folders** are **copied** to `~/Library/Application Support/TESDA-Worklog/archive/`. Your other projects (Appetiser, personal) aren't copied and follow Claude Code's 30 days. `~/.claude/projects` itself is only ever read.
+- Reports read from both places, so you can still report any TESDA day in the current half-year.
+- **7 days before** Jun 30 / Dec 31 and **on the day itself**, you get a notification plus a dialog: **Export a copy…** (zip), **Get report now…**, or **OK**. Use the time to generate any reports you need.
+- **The morning after** (Jul 1 / Jan 1, or the next time the Mac is on), that half-year's archive is deleted. Your saved reports and manual entries are **never** deleted.
+- The dates are in `archive_purge_dates`. `worklog archive` shows the current size and the next purge date.
+
+Sessions under *Needs review* (for example, ones started in your home folder) aren't TESDA folders, so they aren't archived and disappear after 30 days.
 
 ## Where files live
 
@@ -123,6 +141,7 @@ worklog paths                   # where everything lives
 | Installed app, `config.json`, `manual_log.jsonl`, logs | `~/Library/Application Support/TESDA-Worklog/` |
 | Reports: `YYYY-MM-DD.md`, `.html`, `.txt` (for Copy), `.json` (metadata) | `~/Library/Application Support/TESDA-Worklog/reports/`, also reachable as `~/Documents/TESDA-Worklog/reports` |
 | LaunchAgents | `~/Library/LaunchAgents/ph.tesda.worklog.report.plist`, `ph.tesda.worklog.menubar.plist` |
+| Archived TESDA transcripts (kept until Jun 30 / Dec 31) | `~/Library/Application Support/TESDA-Worklog/archive/` |
 | Your Claude Code history (read-only) | `~/.claude/projects/` |
 
 Why aren't reports stored directly in Documents? macOS privacy protection lets background jobs *create* files in `~/Documents` but stops them from *rewriting* files that another app (such as Terminal) made, so regenerating a report would fail. The app folder doesn't have that restriction. The Documents link gives you the same convenience.
@@ -150,12 +169,12 @@ To run it right now: `launchctl kickstart -k gui/$(id -u)/ph.tesda.worklog.repor
 
 **The menu bar icon is missing.** Run `launchctl kickstart -k gui/$(id -u)/ph.tesda.worklog.menubar`, or `bash install.sh`. If too many menu bar icons are crowding it out, hold ⌘ and drag icons to rearrange them.
 
-**History older than 30 days is missing.** Claude Code deletes transcripts after 30 days by default. To keep more (for monthly reports), add `"cleanupPeriodDays": 365` to `~/.claude/settings.json`.
+**A TESDA day older than 30 days is missing.** Only sessions from folders listed in `projects` are archived, and only from the day the app was installed. Check with `worklog archive`. If you added a folder to config.json later, sessions older than 30 days from before that are already gone.
 
 ## Development
 
 ```bash
-python3 -m unittest discover -s tests -v       # 33 tests on synthetic transcripts (tests/fixtures)
+python3 -m unittest discover -s tests -v       # 38 tests on synthetic transcripts (tests/fixtures)
 python3 tests/make_fixtures.py                 # regenerate the fixtures after editing them
 swiftc -O menubar.swift -o build/TESDAWorklog  # compile check
 ```

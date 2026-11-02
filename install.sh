@@ -1,11 +1,12 @@
 #!/bin/bash
 # TESDA Worklog installer for macOS.
 #
-#   bash install.sh
+#   bash install.sh          # install or update
+#   bash install.sh --dock   # same, and pin "TESDA Worklog" to the Dock
 #
 # Safe to run again: after you change the code, run it to update the installed copy.
 # It copies the app OFF the external drive into ~/Library/Application Support/TESDA-Worklog,
-# compiles the menu bar app, creates config.json if it's missing (never overwrites it),
+# builds "TESDA Worklog.app" in ~/Applications (menu bar app + octopus icon), creates config.json if it's missing (never overwrites it),
 # installs the `worklog` command, and (re)loads two LaunchAgents:
 #   ph.tesda.worklog.report   - the morning report (and catch-up at login)
 #   ph.tesda.worklog.menubar  - the menu bar icon, started at login
@@ -15,6 +16,7 @@ SRC="$(cd "$(dirname "$0")" && pwd)"
 APP="$HOME/Library/Application Support/TESDA-Worklog"
 AGENTS="$HOME/Library/LaunchAgents"
 BIN_DIR="$HOME/.local/bin"
+BUNDLE="$HOME/Applications/TESDA Worklog.app"
 REPORT_JOB="ph.tesda.worklog.report"
 MENU_JOB="ph.tesda.worklog.menubar"
 GUI="gui/$(id -u)"
@@ -33,9 +35,33 @@ CLAUDE="$(command -v claude || true)"
 # 2. Copy the app off the external drive -----------------------------------------
 mkdir -p "$APP/logs" "$APP/inbox" "$AGENTS" "$BIN_DIR"
 cp "$SRC/worklog.py" "$APP/.worklog.py.new" && mv "$APP/.worklog.py.new" "$APP/worklog.py"
-say "Compiling the menu bar app (takes ~30 s)…"
-swiftc -O "$SRC/menubar.swift" -o "$APP/.TESDAWorklog.new"
-mv "$APP/.TESDAWorklog.new" "$APP/TESDAWorklog"
+say "Building TESDA Worklog.app (takes ~30 s)…"
+[ -f "$SRC/assets/AppIcon.icns" ] || swift "$SRC/assets/make_icon.swift"
+mkdir -p "$BUNDLE/Contents/MacOS" "$BUNDLE/Contents/Resources"
+swiftc -O "$SRC/menubar.swift" -o "$BUNDLE/Contents/MacOS/.TESDAWorklog.new"
+mv "$BUNDLE/Contents/MacOS/.TESDAWorklog.new" "$BUNDLE/Contents/MacOS/TESDAWorklog"
+cp "$SRC/assets/AppIcon.icns" "$BUNDLE/Contents/Resources/AppIcon.icns"
+cat > "$BUNDLE/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleIdentifier</key><string>ph.tesda.worklog</string>
+  <key>CFBundleName</key><string>TESDA Worklog</string>
+  <key>CFBundleDisplayName</key><string>TESDA Worklog</string>
+  <key>CFBundleExecutable</key><string>TESDAWorklog</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>1.1</string>
+  <key>CFBundleVersion</key><string>$(date +%Y%m%d%H%M)</string>
+  <key>LSMinimumSystemVersion</key><string>13.0</string>
+  <key>LSUIElement</key><true/>
+  <key>NSHighResolutionCapable</key><true/>
+</dict></plist>
+PLIST
+codesign --force --sign - "$BUNDLE" >/dev/null 2>&1 || true      # ad-hoc signature for a locally built app
+touch "$BUNDLE"
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$BUNDLE" || true
+rm -f "$APP/TESDAWorklog"                                        # the pre-1.1 location of the menu bar app
 
 # 3. Config (created once; your edits are kept) -------------------------------------
 "$PY" "$APP/worklog.py" init --claude-path="$CLAUDE"
@@ -108,7 +134,7 @@ cat > "$AGENTS/$MENU_JOB.plist" <<PLIST
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>$MENU_JOB</string>
-  <key>ProgramArguments</key><array><string>$APP/TESDAWorklog</string></array>
+  <key>ProgramArguments</key><array><string>$BUNDLE/Contents/MacOS/TESDAWorklog</string><string>--login</string></array>
   <key>WorkingDirectory</key><string>$APP</string>
   <key>EnvironmentVariables</key><dict>
     <key>PATH</key><string>$JOB_PATH</string>
@@ -135,6 +161,17 @@ for JOB in "$MENU_JOB" "$REPORT_JOB"; do
   launchctl print "$GUI/$JOB" >/dev/null 2>&1 || die "Couldn't load $JOB. Try: launchctl bootstrap $GUI \"$AGENTS/$JOB.plist\""
 done
 
+# 5b. Optional: pin to the Dock ------------------------------------------------------------
+if [ "${1:-}" = "--dock" ]; then
+  if defaults read com.apple.dock persistent-apps 2>/dev/null | grep -q "TESDA%20Worklog.app"; then
+    say "TESDA Worklog is already in your Dock."
+  else
+    defaults write com.apple.dock persistent-apps -array-add "<dict><key>tile-data</key><dict><key>file-data</key><dict><key>_CFURLString</key><string>file://${BUNDLE// /%20}/</string><key>_CFURLStringType</key><integer>15</integer></dict></dict></dict>"
+    killall Dock
+    say "Pinned TESDA Worklog to your Dock."
+  fi
+fi
+
 # 6. Done -------------------------------------------------------------------------------
 say ""
 say "✅ TESDA Worklog is installed."
@@ -143,6 +180,7 @@ say "   Reports:       $REPORTS"
 [ -L "$DOCS_LINK" ] && say "                  (also at $DOCS_LINK)"
 say "   Morning report: every workday at $REPORT_TIME (covers the previous workday)"
 say "   Menu bar icon:  running now, starts at login"
+say "   App:           $BUNDLE  (click it in the Dock or Launchpad to open the report window)"
 case ":$PATH:" in *":$BIN_DIR:"*) ;; *) say "   ⚠️  Add $BIN_DIR to your PATH to use the 'worklog' command.";; esac
 say ""
 say "Next: tell it which folders are TESDA work."

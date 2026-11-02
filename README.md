@@ -1,5 +1,7 @@
 # TESDA Worklog
 
+<img src="assets/AppIcon-1024.png" width="128" alt="TESDA Worklog icon: a white octopus holding a pen">
+
 A small macOS menu bar utility. Every weekday morning it gives you a report of what you did for **TESDA** on the previous workday. You can paste it into your accomplishment form.
 
 - **Automatic:** it reads the session history that Claude Code (Claude CLI) already saves. Nothing extra runs while you work.
@@ -28,15 +30,17 @@ bash install.sh
 
 The installer is safe to run again. It:
 
-1. **copies** `worklog.py` to `~/Library/Application Support/TESDA-Worklog/` and compiles the menu bar app there. Nothing that runs in the background depends on the T7 drive being plugged in.
+1. **copies** `worklog.py` to `~/Library/Application Support/TESDA-Worklog/` and builds **`~/Applications/TESDA Worklog.app`** (the menu bar app, with the octopus icon). Nothing that runs in the background depends on the T7 drive being plugged in.
 2. creates `config.json` there if it's missing (it never overwrites your edits)
 3. installs the `worklog` command in `~/.local/bin`
 4. links `~/Documents/TESDA-Worklog/reports` → the reports folder, so you can find your reports in Documents
 5. loads two LaunchAgents: the morning report and the menu bar icon (which starts at login)
 
+**Dock icon:** run `bash install.sh --dock` once to pin *TESDA Worklog* to the Dock, or drag it there from `~/Applications`. You can also open it from Launchpad or Spotlight. Opening it shows the report window, and the app appears in the Dock and ⌘-Tab while that window is open. The menu bar icon is always there.
+
 **Update after a code change:** edit the files on T7, then run `bash install.sh` again.
 
-**Uninstall:** `bash uninstall.sh` removes the app, icon, background jobs and `worklog` command, and keeps your config, notes and reports. `bash uninstall.sh --all` also deletes config and notes. Reports are never deleted.
+**Uninstall:** `bash uninstall.sh` removes the app (and its Dock pin), menu bar icon, background jobs and `worklog` command, and keeps your config, notes and reports. `bash uninstall.sh --all` also deletes config and notes. Reports are never deleted.
 
 ## Set up config.json
 
@@ -138,7 +142,8 @@ Sessions under *Needs review* (for example, ones started in your home folder) ar
 | What | Where |
 |---|---|
 | Source code (edit here) | `/Volumes/T7/dev/tesda-worklog/` |
-| Installed app, `config.json`, `manual_log.jsonl`, logs | `~/Library/Application Support/TESDA-Worklog/` |
+| The app (menu bar + Dock) | `~/Applications/TESDA Worklog.app` |
+| Installed `worklog.py`, `config.json`, `manual_log.jsonl`, logs | `~/Library/Application Support/TESDA-Worklog/` |
 | Reports: `YYYY-MM-DD.md`, `.html`, `.txt` (for Copy), `.json` (metadata) | `~/Library/Application Support/TESDA-Worklog/reports/`, also reachable as `~/Documents/TESDA-Worklog/reports` |
 | LaunchAgents | `~/Library/LaunchAgents/ph.tesda.worklog.report.plist`, `ph.tesda.worklog.menubar.plist` |
 | Archived TESDA transcripts (kept until Jun 30 / Dec 31) | `~/Library/Application Support/TESDA-Worklog/archive/` |
@@ -177,6 +182,7 @@ To run it right now: `launchctl kickstart -k gui/$(id -u)/ph.tesda.worklog.repor
 python3 -m unittest discover -s tests -v       # 38 tests on synthetic transcripts (tests/fixtures)
 python3 tests/make_fixtures.py                 # regenerate the fixtures after editing them
 swiftc -O menubar.swift -o build/TESDAWorklog  # compile check
+swift assets/make_icon.swift                   # redraw the icon (assets/AppIcon.icns + preview PNG)
 ```
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how it works and [docs/ROADMAP.md](docs/ROADMAP.md) for what's next. `reference/` holds the earlier prototype this was built from.

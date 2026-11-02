@@ -1,6 +1,6 @@
 // TESDA Worklog: the menu bar app.
 //
-// Build:  swiftc -O menubar.swift -o TESDAWorklog      (install.sh does this for you)
+// Build:  install.sh compiles this into ~/Applications/TESDA Worklog.app (with the octopus icon).
 //
 // The app does no report logic itself. Every action runs worklog.py (in the same folder)
 // in the background, and the app shows the files it writes. It also watches two files in
@@ -15,7 +15,17 @@ import WebKit
 
 let env = ProcessInfo.processInfo.environment
 let appDir = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath().deletingLastPathComponent()
-let scriptPath = env["WORKLOG_SCRIPT"] ?? appDir.appendingPathComponent("worklog.py").path
+let dataDirDefault = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/TESDA-Worklog")
+/// worklog.py: next to the binary (old layout), else in the app's data folder (app bundle in ~/Applications).
+let scriptPath: String = {
+    if let s = env["WORKLOG_SCRIPT"] { return s }
+    let sibling = appDir.appendingPathComponent("worklog.py").path
+    if FileManager.default.fileExists(atPath: sibling) { return sibling }
+    let home = env["WORKLOG_HOME"].map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath) } ?? dataDirDefault
+    return home.appendingPathComponent("worklog.py").path
+}()
+/// launchd starts us at login with --login; opened from the Dock/Finder, we show the report window.
+let startedAtLogin = CommandLine.arguments.contains("--login")
 let pythonPath = env["WORKLOG_PYTHON"] ?? "/usr/bin/python3"
 let appendixMark = "<!-- appendix:"
 
@@ -158,6 +168,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var automation: Automation?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Already running (e.g. started at login)? Ask that copy to show its window, and quit.
+        if let id = Bundle.main.bundleIdentifier,
+           NSRunningApplication.runningApplications(withBundleIdentifier: id).contains(where: { $0 != NSRunningApplication.current }) {
+            try? FileManager.default.createDirectory(at: paths.inbox, withIntermediateDirectories: true)
+            try? Data(#"{"picker": true}"#.utf8).write(to: paths.inbox.appendingPathComponent("show.json"))
+            exit(0)
+        }
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         setIcon("list.checklist")
         statusItem.button?.toolTip = "TESDA Worklog"
@@ -177,6 +194,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         try? FileManager.default.createDirectory(at: paths.inbox, withIntermediateDirectories: true)
         timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in self?.tick() }
         if env["WORKLOG_AUTOMATION"] == "1" { automation = Automation(app: self) }
+        if !startedAtLogin && Bundle.main.bundleIdentifier != nil { getReportNow() }
+    }
+
+    /// Clicking the Dock icon (or opening the app again) shows the report window.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        getReportNow()
+        return false
+    }
+
+    /// In the Dock (with the octopus icon) only while the report window is open.
+    func setDockVisible(_ visible: Bool) {
+        guard Bundle.main.bundleIdentifier != nil else { return }   // bare binary: no icon to show
+        NSApp.setActivationPolicy(visible ? .regular : .accessory)
     }
 
     func item(_ title: String, _ action: Selector, _ key: String) -> NSMenuItem {
@@ -223,8 +253,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let req = paths.inbox.appendingPathComponent("show.json")
         if let data = try? Data(contentsOf: req) {
             try? FileManager.default.removeItem(at: req)   // tells worklog.py we got it
-            if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any], let day = obj["day"] as? String {
-                window().present(day: day)
+            if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                if let day = obj["day"] as? String { window().present(day: day) } else { getReportNow() }
             }
         }
         let alertReq = paths.inbox.appendingPathComponent("alert.json")
@@ -502,6 +532,7 @@ final class ReportWindowController: NSObject, NSWindowDelegate, WKNavigationDele
     // ---- showing the window
 
     private func bringToFront() {
+        app.setDockVisible(true)
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
     }
@@ -728,6 +759,8 @@ final class ReportWindowController: NSObject, NSWindowDelegate, WKNavigationDele
     // ---- window + web view delegates
 
     func windowShouldClose(_ sender: NSWindow) -> Bool { true }   // a running report keeps going; we reopen when done
+
+    func windowWillClose(_ notification: Notification) { app.setDockVisible(false) }
 
     func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {

@@ -15,7 +15,20 @@ done
 if grep -q "Installed by TESDA Worklog" "$HOME/.local/bin/worklog" 2>/dev/null; then
   rm -f "$HOME/.local/bin/worklog"
 fi
+rm -rf "$HOME/Applications/TESDA Worklog.app"
 rm -f "$APP/TESDAWorklog" "$APP/worklog.py"
+# Unpin from the Dock if it was pinned (install.sh --dock).
+if defaults read com.apple.dock persistent-apps 2>/dev/null | grep -q "TESDA%20Worklog.app"; then
+  /usr/bin/python3 - <<'PY'
+import plistlib, subprocess
+raw = subprocess.run(["defaults", "export", "com.apple.dock", "-"], capture_output=True).stdout
+dock = plistlib.loads(raw)
+dock["persistent-apps"] = [a for a in dock.get("persistent-apps", [])
+                           if "TESDA%20Worklog.app" not in str(a.get("tile-data", {}).get("file-data", {}).get("_CFURLString", ""))]
+subprocess.run(["defaults", "import", "com.apple.dock", "-"], input=plistlib.dumps(dock))
+PY
+  killall Dock
+fi
 rm -rf "$APP/inbox" "$APP/running.json"
 
 if [ "${1:-}" = "--all" ]; then

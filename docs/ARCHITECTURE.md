@@ -46,6 +46,7 @@ flowchart TB
 |---|---|
 | `worklog.py` | The whole engine and the CLI. Reads transcripts, classifies sessions by folder, merges manual entries, builds evidence, calls `claude -p`, and writes `YYYY-MM-DD.{md,html,txt,json}`. It also handles notification and delivery, and the "should the morning job run now?" logic. Includes a ~100-line Markdown→HTML renderer, so there are no dependencies. |
 | `menubar.swift` | The menu bar icon (`list.checklist`), the *Log something…* dialog, and the *Get report now* window (period picker, spinner + Cancel, WKWebView, Copy / Open file / Regenerate / Close). It runs `worklog.py` as a background `Process`. Once a second it checks `inbox/show.json` and `running.json`. |
+| `assets/make_icon.swift` | Draws the octopus icon with AppKit and builds `AppIcon.icns` with `iconutil`. There are no image files to maintain by hand. |
 | `install.sh` | Copies the app to `~/Library/Application Support/TESDA-Worklog`, compiles Swift, creates the config, the `worklog` command and the Documents link, and writes and loads both LaunchAgents. Safe to run again. |
 | `uninstall.sh` | Removes jobs, binaries and the command. Keeps data unless you pass `--all`. |
 | `tests/make_fixtures.py` | Writes synthetic transcripts that mimic the real JSONL format, including the noisy parts. |
@@ -91,6 +92,8 @@ Claude Code writes one JSONL file per session. Only lines with `type` set to `us
 **Plain files for inter-process communication.** The 8 AM job writes `inbox/show.json`, and the menu bar app deletes it within a second and opens the window. If nobody deletes it within a few seconds, the app isn't running, so the job opens the HTML in the browser instead. `running.json` (with a PID) dims the icon while any report is being written, wherever it was started. No sockets, URL schemes or app bundle needed.
 
 **launchd fires daily, Python decides.** The plist fires every day at `report_time` and at login. `worklog.py report --scheduled` checks if today is a workday, if it's after `report_time`, and if today's report was already delivered (`state.json`). That makes workdays configurable without editing the plist, and it gives catch-up after sleep (launchd runs missed calendar jobs on wake) and after power-off (login).
+
+**A tiny app bundle, not an Xcode project.** `install.sh` assembles `~/Applications/TESDA Worklog.app` by hand: an Info.plist, the `swiftc` binary and the icon, signed ad-hoc. `LSUIElement` keeps it a menu-bar app, and it switches to a regular app (Dock tile, ⌘-Tab) only while the report window is open. launchd starts it at login with `--login`, which means "stay quiet". Opened from the Dock or Finder, LaunchServices recognises the running copy and sends it a *reopen* event, which shows the window. If a second copy ever starts anyway, it asks the first copy (via `inbox/show.json`) to show the window and quits.
 
 **Small, boring tech.** Python standard library (works with Apple's Python 3.9), one Swift file compiled with `swiftc` (no Xcode project), launchd, osascript.
 
